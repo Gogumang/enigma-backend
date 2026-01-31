@@ -1,0 +1,27 @@
+# Web Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.18
+
+# Data Validation
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# HTTP Client
+httpx>=0.28.0
+
+# Image Processing
+pillow>=11.0.0
+numpy>=2.0.0
+
+# AI/ML
+deepface>=0.0.93
+tensorflow>=2.18.0
+openai>=1.59.0
+
+# Database
+qdrant-client>=1.12.0
+neo4j>=5.27.0
+
+# Web Scraping
+beautifulsoup4>=4.12.0

@@ -1,0 +1,95 @@
+from fastapi import APIRouter, Depends, File, UploadFile
+from pydantic import BaseModel
+
+from src.application.deepfake import (
+    AnalyzeImageUseCase,
+    AnalyzeVideoUseCase,
+    DeepfakeAnalysisResult,
+)
+from src.interfaces.api.dependencies import (
+    get_analyze_image_use_case,
+    get_analyze_video_use_case,
+)
+
+router = APIRouter(prefix="/deepfake", tags=["deepfake"])
+
+
+class AnalyzeUrlRequest(BaseModel):
+    url: str
+
+
+class AnalysisResponse(BaseModel):
+    success: bool
+    data: dict | None = None
+    error: str | None = None
+
+
+def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
+    return {
+        "isDeepfake": result.is_deepfake,
+        "confidence": result.confidence,
+        "riskLevel": result.risk_level,
+        "mediaType": result.media_type,
+        "message": result.message,
+        "details": result.details,
+        "analysisReasons": result.analysis_reasons,
+        "markers": result.markers,
+        "technicalIndicators": result.technical_indicators,
+        "overallAssessment": result.overall_assessment
+    }
+
+
+@router.post("/analyze/image", response_model=AnalysisResponse)
+async def analyze_image(
+    file: UploadFile = File(...),
+    use_case: AnalyzeImageUseCase = Depends(get_analyze_image_use_case)
+):
+    """이미지 딥페이크 분석"""
+    try:
+        image_data = await file.read()
+        result = await use_case.execute(image_data)
+
+        return AnalysisResponse(
+            success=True,
+            data=_result_to_dict(result)
+        )
+
+    except Exception as e:
+        return AnalysisResponse(success=False, error=str(e))
+
+
+@router.post("/analyze/url", response_model=AnalysisResponse)
+async def analyze_image_url(
+    request: AnalyzeUrlRequest,
+    use_case: AnalyzeImageUseCase = Depends(get_analyze_image_use_case)
+):
+    """URL 이미지 딥페이크 분석"""
+    try:
+        result = await use_case.execute_from_url(request.url)
+
+        return AnalysisResponse(
+            success=True,
+            data=_result_to_dict(result)
+        )
+
+    except Exception as e:
+        return AnalysisResponse(success=False, error=str(e))
+
+
+@router.post("/analyze/video", response_model=AnalysisResponse)
+async def analyze_video(
+    file: UploadFile = File(...),
+    use_case: AnalyzeVideoUseCase = Depends(get_analyze_video_use_case)
+):
+    """비디오 딥페이크 분석"""
+    try:
+        video_data = await file.read()
+        result = await use_case.execute(video_data)
+
+        return AnalysisResponse(
+            success=True,
+            data=_result_to_dict(result)
+        )
+
+    except Exception as e:
+        return AnalysisResponse(success=False, error=str(e))
