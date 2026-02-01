@@ -1,25 +1,29 @@
 """
-로맨스 스캠 면역 훈련 API
-Fakebok 스타일의 스캠 시뮬레이션
+로맨스 스캠 면역 훈련 API V2
+LangGraph 기반의 동적 시나리오 분기 지원
 """
-from typing import Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from src.application.training import ScamTrainingUseCase
-from src.interfaces.api.dependencies import get_openai_service
+from src.application.training import (
+    ScamTrainingUseCaseV2,
+    generate_feed_posts,
+)
+from src.application.training.personas import SCAMMER_PERSONAS
+from src.shared.config import get_settings
 
 router = APIRouter(prefix="/training", tags=["scam-training"])
 
 # 훈련 유스케이스 싱글톤
-_training_use_case: Optional[ScamTrainingUseCase] = None
+_training_use_case: ScamTrainingUseCaseV2 | None = None
 
 
-def get_training_use_case() -> ScamTrainingUseCase:
+def get_training_use_case() -> ScamTrainingUseCaseV2:
     global _training_use_case
     if _training_use_case is None:
-        _training_use_case = ScamTrainingUseCase(get_openai_service())
+        settings = get_settings()
+        _training_use_case = ScamTrainingUseCaseV2(settings.openai_api_key)
     return _training_use_case
 
 
@@ -43,13 +47,13 @@ class EndSessionRequest(BaseModel):
 class ApiResponse(BaseModel):
     """API 응답"""
     success: bool
-    data: Optional[dict] = None
-    error: Optional[str] = None
+    data: dict | None = None
+    error: str | None = None
 
 
 @router.get("/personas", response_model=ApiResponse)
 async def list_personas(
-    use_case: ScamTrainingUseCase = Depends(get_training_use_case)
+    use_case: ScamTrainingUseCaseV2 = Depends(get_training_use_case)
 ):
     """사용 가능한 스캐머 페르소나 목록"""
     personas = use_case.list_personas()
@@ -62,23 +66,36 @@ async def list_personas(
 @router.post("/start", response_model=ApiResponse)
 async def start_training(
     request: StartSessionRequest,
-    use_case: ScamTrainingUseCase = Depends(get_training_use_case)
+    use_case: ScamTrainingUseCaseV2 = Depends(get_training_use_case)
 ):
     """훈련 세션 시작"""
     try:
-        session, opening_message = await use_case.start_session(request.persona_id)
+        session_info, opening_message = await use_case.start_session(request.persona_id)
+
+        persona = SCAMMER_PERSONAS.get(session_info["persona_id"])
+
+        # 플랫폼별 피드 게시물 생성
+        feed_posts = []
+        if persona:
+            feed_posts = generate_feed_posts(persona.platform, persona.name)
 
         return ApiResponse(
             success=True,
             data={
-                "sessionId": session.id,
+                "sessionId": session_info["session_id"],
                 "persona": {
-                    "id": session.persona_id,
-                    "name": session.persona_name,
-                    "difficulty": session.difficulty,
+                    "id": session_info["persona_id"],
+                    "name": session_info["persona_name"],
+                    "platform": persona.platform if persona else None,
+                    "profile_photo": f"/{persona.profile_photo_path}" if persona and persona.profile_photo_path else None,
+                    "difficulty": session_info["difficulty"],
+                    "occupation": persona.occupation if persona else None,
+                    "backstory": persona.backstory if persona else None,
                 },
                 "openingMessage": opening_message,
-                "hint": "💡 이것은 스캠 시뮬레이션입니다. 상대방은 AI 스캐머 역할을 합니다. 실제처럼 대응해보세요!",
+                "currentStage": session_info["current_stage"],
+                "feedPosts": feed_posts,
+                "hint": "이것은 스캠 시뮬레이션입니다. 상대방은 AI 스캐머 역할을 합니다. 실제처럼 대응해보세요!",
             }
         )
 
@@ -89,7 +106,7 @@ async def start_training(
 @router.post("/message", response_model=ApiResponse)
 async def send_message(
     request: SendMessageRequest,
-    use_case: ScamTrainingUseCase = Depends(get_training_use_case)
+    use_case: ScamTrainingUseCaseV2 = Depends(get_training_use_case)
 ):
     """메시지 전송 및 스캐머 응답 받기"""
     try:
@@ -103,23 +120,27 @@ async def send_message(
             data={
                 "sessionId": response.session_id,
                 "scammerMessage": response.scammer_message,
-                "currentPhase": response.current_phase,
+                "currentStage": response.current_stage,
                 "turnCount": response.turn_count,
+                "userScore": response.user_score,
                 "hint": response.hint,
                 "detectedTactic": response.detected_tactic,
+                "imageUrl": response.image_url,
+                "isCompleted": response.is_completed,
+                "completionReason": response.completion_reason,
             }
         )
 
     except ValueError as e:
         return ApiResponse(success=False, error=str(e))
     except Exception as e:
-        return ApiResponse(success=False, error=f"오류 발생: {str(e)}")
+        return ApiResponse(success=False, error=f"오류 발생: {e!s}")
 
 
 @router.post("/end", response_model=ApiResponse)
 async def end_training(
     request: EndSessionRequest,
-    use_case: ScamTrainingUseCase = Depends(get_training_use_case)
+    use_case: ScamTrainingUseCaseV2 = Depends(get_training_use_case)
 ):
     """훈련 세션 종료 및 결과 확인"""
     try:
@@ -142,38 +163,60 @@ async def end_training(
     except ValueError as e:
         return ApiResponse(success=False, error=str(e))
     except Exception as e:
-        return ApiResponse(success=False, error=f"오류 발생: {str(e)}")
+        return ApiResponse(success=False, error=f"오류 발생: {e!s}")
 
 
 @router.get("/session/{session_id}", response_model=ApiResponse)
 async def get_session(
     session_id: str,
-    use_case: ScamTrainingUseCase = Depends(get_training_use_case)
+    use_case: ScamTrainingUseCaseV2 = Depends(get_training_use_case)
 ):
     """세션 상태 조회"""
     session = use_case.get_session(session_id)
     if not session:
         return ApiResponse(success=False, error="세션을 찾을 수 없습니다")
 
+    persona = SCAMMER_PERSONAS.get(session["persona_id"])
+
+    # 플랫폼별 피드 게시물 생성
+    feed_posts = []
+    if persona:
+        feed_posts = generate_feed_posts(persona.platform, persona.name)
+
     return ApiResponse(
         success=True,
         data={
-            "sessionId": session.id,
+            "sessionId": session["session_id"],
             "persona": {
-                "id": session.persona_id,
-                "name": session.persona_name,
+                "id": session["persona_id"],
+                "name": session["persona_name"],
+                "platform": persona.platform if persona else None,
+                "profile_photo": f"/{persona.profile_photo_path}" if persona and persona.profile_photo_path else None,
+                "occupation": persona.occupation if persona else None,
             },
-            "currentPhase": session.current_phase.value,
-            "userScore": session.user_score,
-            "turnCount": len([m for m in session.messages if m.role == "user"]),
-            "isCompleted": session.is_completed,
-            "messages": [
-                {
-                    "role": m.role,
-                    "content": m.content,
-                    "timestamp": m.timestamp.isoformat(),
-                }
-                for m in session.messages
-            ],
+            "currentStage": session["current_stage"],
+            "userScore": session["user_score"],
+            "turnCount": session["turn_count"],
+            "isCompleted": session["is_completed"],
+            "feedPosts": feed_posts,
+            "messages": session["messages"],
+        }
+    )
+
+
+@router.get("/feed/{persona_id}", response_model=ApiResponse)
+async def get_feed_posts(persona_id: str):
+    """페르소나별 피드 게시물 조회"""
+    persona = SCAMMER_PERSONAS.get(persona_id)
+    if not persona:
+        return ApiResponse(success=False, error="페르소나를 찾을 수 없습니다")
+
+    feed_posts = generate_feed_posts(persona.platform, persona.name)
+    return ApiResponse(
+        success=True,
+        data={
+            "personaId": persona_id,
+            "platform": persona.platform,
+            "posts": feed_posts,
         }
     )

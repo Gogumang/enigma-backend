@@ -25,6 +25,11 @@ class AnalysisResponse(BaseModel):
 
 
 def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
+    # 히트맵 추출 (details에서)
+    heatmap_base64 = None
+    if result.details and "heatmap_base64" in result.details:
+        heatmap_base64 = result.details.pop("heatmap_base64")
+
     return {
         "isDeepfake": result.is_deepfake,
         "confidence": result.confidence,
@@ -35,7 +40,14 @@ def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
         "analysisReasons": result.analysis_reasons,
         "markers": result.markers,
         "technicalIndicators": result.technical_indicators,
-        "overallAssessment": result.overall_assessment
+        "overallAssessment": result.overall_assessment,
+        # 히트맵 이미지 (base64)
+        "heatmapImage": heatmap_base64,
+        # 이미지 품질 정보
+        "imageQuality": result.image_quality,
+        "blurScore": result.blur_score,
+        "qualityWarning": result.quality_warning,
+        "isReliable": result.is_reliable,
     }
 
 

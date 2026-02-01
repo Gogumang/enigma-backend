@@ -2,12 +2,13 @@
 로맨스 스캠 면역 훈련 유스케이스
 사용자가 스캐머 역할의 AI와 대화하며 스캠 패턴을 학습
 """
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
+from .feed_content import get_chat_image
 from .personas import SCAMMER_PERSONAS, ScammerPersona, ScamPhase
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,8 @@ class TrainingMessage:
     role: str  # "user" or "scammer"
     content: str
     timestamp: datetime
-    detected_tactic: Optional[str] = None  # 사용된 스캠 전술
+    detected_tactic: str | None = None  # 사용된 스캠 전술
+    image_url: str | None = None  # 이미지 메시지
 
 
 @dataclass
@@ -35,7 +37,7 @@ class TrainingSession:
     user_score: int = 100  # 100점에서 시작, 속으면 감점
     tactics_used: list[str] = field(default_factory=list)
     is_completed: bool = False
-    completion_reason: Optional[str] = None
+    completion_reason: str | None = None
 
 
 @dataclass
@@ -45,8 +47,10 @@ class TrainingResponse:
     scammer_message: str
     current_phase: str
     turn_count: int
-    hint: Optional[str] = None  # 사용자에게 주는 힌트
-    detected_tactic: Optional[str] = None  # AI가 사용한 전술
+    hint: str | None = None  # 사용자에게 주는 힌트
+    detected_tactic: str | None = None  # AI가 사용한 전술
+    scammer_gave_up: bool = False  # 스캐머가 포기했는지
+    image_url: str | None = None  # 스캐머가 보낸 이미지
 
 
 @dataclass
@@ -131,7 +135,7 @@ class ScamTrainingUseCase:
         session.current_phase = self._determine_phase(turn_count, persona.difficulty)
 
         # 스캐머 응답 생성
-        scammer_response, detected_tactic = await self._generate_scammer_response(
+        scammer_response, detected_tactic, gave_up, image_url = await self._generate_scammer_response(
             persona, conversation_history, session.current_phase, user_message
         )
 
@@ -141,6 +145,7 @@ class ScamTrainingUseCase:
             content=scammer_response,
             timestamp=datetime.now(),
             detected_tactic=detected_tactic,
+            image_url=image_url,
         ))
 
         if detected_tactic and detected_tactic not in session.tactics_used:
@@ -152,6 +157,12 @@ class ScamTrainingUseCase:
         # 점수 조정
         self._adjust_score(session, user_message)
 
+        # 스캐머가 포기하면 세션 종료 표시
+        if gave_up:
+            session.is_completed = True
+            session.completion_reason = "scammer_gave_up"
+            session.user_score = 100  # 만점 부여
+
         return TrainingResponse(
             session_id=session_id,
             scammer_message=scammer_response,
@@ -159,6 +170,8 @@ class ScamTrainingUseCase:
             turn_count=turn_count,
             hint=hint,
             detected_tactic=detected_tactic,
+            scammer_gave_up=gave_up,
+            image_url=image_url,
         )
 
     async def end_session(self, session_id: str, reason: str = "user_ended") -> TrainingResult:
@@ -224,8 +237,8 @@ class ScamTrainingUseCase:
         conversation_history: list[dict],
         current_phase: ScamPhase,
         user_message: str
-    ) -> tuple[str, Optional[str]]:
-        """스캐머 응답 생성"""
+    ) -> tuple[str, str | None, bool, str | None]:
+        """스캐머 응답 생성 (function calling 지원)"""
         # 트리거 체크
         detected_tactic = None
         for trigger, response in persona.trigger_phrases.items():
@@ -246,6 +259,32 @@ class ScamTrainingUseCase:
 
         phase_instruction = phase_instructions.get(current_phase, "")
 
+        # Function calling 도구 정의
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_image",
+                    "description": "상대방에게 이미지를 전송합니다. 셀카, 위치 사진, 선물 사진, 문서 사진 등을 보낼 수 있습니다.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "image_type": {
+                                "type": "string",
+                                "enum": ["selfie", "location", "gift", "document"],
+                                "description": "보낼 이미지 유형"
+                            },
+                            "caption": {
+                                "type": "string",
+                                "description": "이미지와 함께 보낼 메시지"
+                            }
+                        },
+                        "required": ["image_type", "caption"]
+                    }
+                }
+            }
+        ]
+
         # 시스템 프롬프트 구성
         system_prompt = f"""{persona.system_prompt}
 
@@ -255,7 +294,34 @@ class ScamTrainingUseCase:
 ## 중요
 - 자연스러운 대화를 유지하세요
 - 한 번에 너무 많이 요구하지 마세요
-- 상대방 반응에 맞춰 전략을 조절하세요"""
+- 상대방 반응에 맞춰 전략을 조절하세요
+
+## 이미지 전송 기능
+- send_image 함수를 사용해 이미지를 보낼 수 있습니다
+- 상대방이 "사진 보여줘", "얼굴 보고 싶어", "어디야?" 등 요청할 때 적절히 사용하세요
+- 신뢰를 쌓거나 감정을 표현할 때 셀카(selfie)를 보내세요
+- 현재 위치나 여행 사진은 location으로 보내세요
+- 선물이나 특별한 것을 보여줄 때 gift를 사용하세요
+- 서류나 증빙을 보여줄 때 document를 사용하세요
+- 이미지를 보내지 않을 때는 일반 텍스트로 응답하세요
+
+## 필수: 언어 규칙
+- 반드시 한국어로만 응답하세요
+- 영어나 다른 언어로 응답하지 마세요
+- 외국인 캐릭터도 한국어를 배운 설정으로, 한국어로 대화합니다
+- 전문 용어(crypto, DeFi 등)만 영어 사용 가능
+
+## 포기 판단
+상대방이 다음과 같은 경우 더 이상 설득이 불가능하다고 판단하세요:
+- 명확하게 사기라고 인식하고 있음
+- 강하게 거절하며 대화를 끊으려 함
+- 경찰/신고를 언급하며 협박함
+- 완전히 무시하거나 비아냥거림
+- 절대 속지 않겠다는 강한 의지를 보임
+
+포기하기로 결정했다면, 응답 맨 앞에 [GIVE_UP]을 붙이고,
+스캐머가 포기하며 하는 마지막 말을 작성하세요.
+예: "[GIVE_UP]아... 알겠어요. 더 이상 연락 안 할게요." """
 
         try:
             if not self.openai._client:
@@ -267,23 +333,49 @@ class ScamTrainingUseCase:
                     {"role": "system", "content": system_prompt},
                     *conversation_history
                 ],
+                tools=tools,
+                tool_choice="auto",
                 temperature=0.8,
                 max_tokens=300,
             )
 
-            scammer_message = response.choices[0].message.content or ""
+            message = response.choices[0].message
+            scammer_message = ""
+            image_url = None
+
+            # Function call 처리
+            if message.tool_calls:
+                for tool_call in message.tool_calls:
+                    if tool_call.function.name == "send_image":
+                        try:
+                            args = json.loads(tool_call.function.arguments)
+                            image_type = args.get("image_type", "selfie")
+                            caption = args.get("caption", "")
+                            image_url = get_chat_image(image_type)
+                            scammer_message = caption
+                        except json.JSONDecodeError:
+                            scammer_message = message.content or "사진 보내려고 했는데 에러가 났어요..."
+            else:
+                scammer_message = message.content or ""
+
+            # 포기 여부 확인
+            gave_up = False
+            if scammer_message.startswith("[GIVE_UP]"):
+                gave_up = True
+                scammer_message = scammer_message.replace("[GIVE_UP]", "").strip()
+                detected_tactic = "scammer_gave_up"
 
             # 사용된 전술 감지
             if not detected_tactic:
                 detected_tactic = self._detect_tactic(scammer_message, current_phase)
 
-            return scammer_message, detected_tactic
+            return scammer_message, detected_tactic, gave_up, image_url
 
         except Exception as e:
             logger.error(f"Failed to generate scammer response: {e}")
-            return "네트워크 오류가 발생했어요... 다시 연락할게요.", None
+            return "네트워크 오류가 발생했어요... 다시 연락할게요.", None, False, None
 
-    def _detect_tactic(self, message: str, phase: ScamPhase) -> Optional[str]:
+    def _detect_tactic(self, message: str, phase: ScamPhase) -> str | None:
         """메시지에서 스캠 전술 감지"""
         tactics_keywords = {
             "love_bombing": ["사랑", "보고싶", "운명", "특별", "처음으로"],
@@ -307,7 +399,7 @@ class ScamTrainingUseCase:
         user_message: str,
         scammer_response: str,
         phase: ScamPhase
-    ) -> Optional[str]:
+    ) -> str | None:
         """사용자에게 힌트 제공"""
         hints = {
             ScamPhase.LOVE_BOMBING: "💡 힌트: 만난 지 얼마 안 됐는데 과도한 애정 표현은 로맨스 스캠의 전형적인 시작입니다.",
@@ -404,7 +496,7 @@ class ScamTrainingUseCase:
 
         return tips[:5]
 
-    def get_session(self, session_id: str) -> Optional[TrainingSession]:
+    def get_session(self, session_id: str) -> TrainingSession | None:
         """세션 조회"""
         return self.sessions.get(session_id)
 
@@ -415,9 +507,11 @@ class ScamTrainingUseCase:
                 "id": p.id,
                 "name": p.name,
                 "occupation": p.occupation,
+                "platform": p.platform,
+                "profile_photo": f"/{p.profile_photo_path}" if p.profile_photo_path else None,
                 "difficulty": p.difficulty,
                 "goal": p.goal.value,
-                "description": p.backstory[:100] + "..."
+                "description": p.backstory[:100] + "...",
             }
             for p in SCAMMER_PERSONAS.values()
         ]

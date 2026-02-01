@@ -292,13 +292,14 @@ class QdrantScamRepository:
             # 입력 텍스트 임베딩
             query_embedding = self._get_embedding(text)
 
-            # 유사도 검색
-            results = self._qdrant.search(
+            # 유사도 검색 (qdrant-client 1.7+에서 search -> query_points로 변경됨)
+            response = self._qdrant.query_points(
                 collection_name=COLLECTION_NAME,
-                query_vector=query_embedding,
+                query=query_embedding,
                 limit=limit,
                 score_threshold=0.3,  # 최소 유사도 30%
             )
+            results = response.points
 
             matched_patterns = []
             total_severity = 0

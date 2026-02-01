@@ -18,6 +18,7 @@ from src.domain.chat import (
     MessageParser,
     MessageRole,
 )
+from src.infrastructure.ai import get_face_landmark_service
 from src.shared.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -452,91 +453,72 @@ JSON만 응답해주세요."""
             return "죄송합니다, 응답을 생성하는 중 오류가 발생했습니다."
 
     async def analyze_deepfake_image(self, image_data: bytes, is_deepfake: bool, confidence: float) -> dict:
-        """이미지 품질 분석 (GPT-4o Vision)"""
+        """이미지 딥페이크 분석 (얼굴 랜드마크 + GPT-4o Vision)"""
+        # 1. 먼저 얼굴 랜드마크로 정확한 좌표 얻기
+        face_landmark_service = get_face_landmark_service()
+        markers = face_landmark_service.get_analysis_markers(image_data, is_deepfake, count=3)
+        logger.info(f"Face landmarks detected: {markers}")
+
         # 클라이언트 초기화
         if not self._client:
             try:
                 await self.initialize()
             except Exception as e:
                 logger.warning(f"OpenAI 초기화 실패: {e}")
-                return self._fallback_deepfake_analysis(is_deepfake, confidence)
+                return self._fallback_deepfake_analysis_with_markers(markers, is_deepfake, confidence)
 
         if not self._client:
-            return self._fallback_deepfake_analysis(is_deepfake, confidence)
+            return self._fallback_deepfake_analysis_with_markers(markers, is_deepfake, confidence)
 
         try:
             base64_image = base64.b64encode(image_data).decode('utf-8')
 
-            # 디지털 미디어 리터러시 교육 맥락
-            system_message = """You are a digital media forensics expert teaching a university course on "Digital Media Literacy and Authentication".
-Your role is to help students identify whether images are authentic photographs or computer-generated/AI-generated content.
-This is for educational purposes to help people recognize synthetic media and protect themselves from misinformation.
-Always analyze images objectively and technically. Respond in Korean."""
+            # 시스템 메시지
+            system_message = """You are a digital media forensics expert.
+Your role is to analyze specific facial regions for signs of AI generation or authenticity.
+Respond in Korean with technical but understandable explanations."""
 
-            # AI 생성 여부 판별에 초점을 맞춘 분석
+            # 마커 위치 정보 생성
+            marker_info = "\n".join([
+                f"- 위치 {m['id']}: {m['label']} (x={m['x']}%, y={m['y']}%)"
+                for m in markers
+            ])
+
             if is_deepfake:
-                analysis_focus = """이 이미지에서 **AI 생성 또는 컴퓨터 합성의 흔적**을 찾아 분석해주세요.
-
-다음 항목들을 중점적으로 검사하세요:
-- 피부 질감: 지나치게 매끄럽거나 플라스틱처럼 보이는지
-- 얼굴 대칭성: 비정상적으로 완벽하거나 미세한 비대칭이 있는지
-- 눈: 동공 반사, 눈동자 디테일, 속눈썹의 자연스러움
-- 머리카락: 가장자리 처리, 개별 머리카락 표현, 배경과의 경계
-- 조명/그림자: 물리적으로 일관성 있는지, 광원 방향이 맞는지
-- 배경: 흐림 처리의 자연스러움, 피사체와의 경계
-- 액세서리(귀걸이, 목걸이 등): 디테일과 일관성
-- 전체적인 "언캐니 밸리" 느낌"""
+                analysis_type = "AI 생성/합성 흔적"
+                focus_points = """각 위치에서 다음을 확인하세요:
+- 눈: 동공 반사 패턴, 눈동자 디테일, 속눈썹 자연스러움
+- 피부/볼: 질감의 자연스러움, 모공 유무, 과도한 매끄러움
+- 입: 입술 경계선, 치아 디테일
+- 기타: 해당 부위의 AI 생성 특징"""
             else:
-                analysis_focus = """이 이미지가 **실제 사진인 근거**를 찾아 분석해주세요.
+                analysis_type = "자연스러운 특징"
+                focus_points = """각 위치에서 다음을 확인하세요:
+- 눈: 자연스러운 동공 반사, 수분감
+- 피부/볼: 자연스러운 모공, 피부결
+- 입: 자연스러운 입술 질감
+- 기타: 실제 사진의 특징"""
 
-다음 항목들을 중점적으로 검사하세요:
-- 피부 질감: 자연스러운 모공, 잔주름, 피부결이 보이는지
-- 자연스러운 비대칭: 실제 얼굴의 미세한 비대칭이 있는지
-- 눈: 자연스러운 동공 반사와 눈의 수분감
-- 머리카락: 자연스러운 흐트러짐, 개별 머리카락 표현
-- 조명: 물리 법칙에 맞는 자연스러운 그림자
-- 카메라 특성: 자연스러운 노이즈/그레인, 렌즈 특성
-- 전체적으로 "실제 사람"의 느낌이 드는 요소"""
+            prompt = f"""이 이미지의 다음 위치들을 분석해주세요:
 
-            # 얼굴 위치 가이드 (일반적인 인물 사진 기준)
-            coordinate_guide = """
-## 좌표 가이드 (인물 사진 기준):
-- 이마/헤어라인: x=50, y=10~20
-- 왼쪽 눈: x=35~40, y=30~35
-- 오른쪽 눈: x=60~65, y=30~35
-- 코: x=50, y=45~50
-- 입: x=50, y=60~65
-- 왼쪽 귀: x=20~25, y=35~45
-- 오른쪽 귀: x=75~80, y=35~45
-- 왼쪽 뺨: x=30, y=50
-- 오른쪽 뺨: x=70, y=50
-- 턱: x=50, y=75~80
-- 목/어깨: x=50, y=85~95"""
+{marker_info}
 
-            prompt = f"""{analysis_focus}
+각 위치에서 **{analysis_type}**을 찾아 설명해주세요.
 
-{coordinate_guide}
-
-위 가이드를 참고하여 실제 이미지에서 해당 영역의 정확한 위치를 퍼센트 좌표(x: 0-100, y: 0-100)로 지정하세요.
+{focus_points}
 
 JSON 형식으로만 응답:
 {{
-    "markers": [
-        {{
-            "id": 1,
-            "x": 정확한_x좌표,
-            "y": 정확한_y좌표,
-            "label": "영역명",
-            "description": "해당 영역의 {'AI 생성 흔적' if is_deepfake else '자연스러운 특징'} 설명"
-        }}
-    ],
+    "descriptions": {{
+        "1": "위치 1에 대한 분석 설명 (1-2문장)",
+        "2": "위치 2에 대한 분석 설명 (1-2문장)",
+        "3": "위치 3에 대한 분석 설명 (1-2문장)"
+    }},
     "overall_assessment": "종합 평가 (2문장)"
-}}
-
-정확히 3개의 markers만 포함하세요."""
+}}"""
 
             response = await self._client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 messages=[
                     {
                         "role": "system",
@@ -550,26 +532,34 @@ JSON 형식으로만 응답:
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/jpeg;base64,{base64_image}",
-                                    "detail": "auto"
+                                    "detail": "high"
                                 }
                             }
                         ]
                     }
                 ],
                 temperature=0.3,
-                max_tokens=800,
+                max_tokens=600,
             )
 
             response_text = response.choices[0].message.content or ""
             logger.info(f"OpenAI deepfake response: {response_text[:500]}")
-            return self._parse_deepfake_response(response_text, is_deepfake, confidence)
+
+            # 응답에서 설명만 파싱하여 마커에 추가
+            return self._parse_deepfake_descriptions(response_text, markers, is_deepfake, confidence)
 
         except Exception as e:
             logger.error(f"Deepfake analysis failed: {e}")
-            return self._fallback_deepfake_analysis(is_deepfake, confidence)
+            return self._fallback_deepfake_analysis_with_markers(markers, is_deepfake, confidence)
 
-    def _parse_deepfake_response(self, response_text: str, is_deepfake: bool, confidence: float) -> dict:
-        """딥페이크 분석 응답 파싱"""
+    def _parse_deepfake_descriptions(
+        self,
+        response_text: str,
+        markers: list[dict],
+        is_deepfake: bool,
+        confidence: float
+    ) -> dict:
+        """GPT 응답에서 설명만 파싱하여 마커에 추가"""
         try:
             # markdown 코드 블록 제거
             cleaned = response_text
@@ -585,33 +575,217 @@ JSON 형식으로만 응답:
                 raise ValueError("No JSON found")
 
             data = json.loads(json_match.group())
+            descriptions = data.get("descriptions", {})
+
+            # 마커에 설명 추가
+            for marker in markers:
+                marker_id = str(marker["id"])
+                if marker_id in descriptions:
+                    marker["description"] = descriptions[marker_id]
+                else:
+                    # 기본 설명
+                    marker["description"] = self._get_default_description(
+                        marker["label"], is_deepfake
+                    )
+
             return {
-                "analysis_reasons": data.get("analysis_reasons", []),
-                "markers": data.get("markers", []),
-                "technical_indicators": data.get("technical_indicators", []),
+                "markers": markers,
                 "overall_assessment": data.get("overall_assessment", "")
             }
         except Exception as e:
-            logger.error(f"Failed to parse deepfake analysis: {e}, response: {response_text[:300]}")
-            return self._fallback_deepfake_analysis(is_deepfake, confidence)
+            logger.error(f"Failed to parse descriptions: {e}, response: {response_text[:300]}")
+            return self._fallback_deepfake_analysis_with_markers(markers, is_deepfake, confidence)
+
+    def _get_default_description(self, label: str, is_deepfake: bool) -> str:
+        """부위별 기본 설명"""
+        if is_deepfake:
+            defaults = {
+                "왼쪽 눈": "부자연스러운 눈동자 반사 패턴이 감지됨",
+                "오른쪽 눈": "조명 반사가 물리적으로 일관성이 부족함",
+                "왼쪽 볼": "피부 질감이 과도하게 매끄러움",
+                "오른쪽 볼": "자연스러운 피부결이 보이지 않음",
+                "입": "입술 경계선이 부자연스러움",
+                "코": "음영 처리가 물리적으로 맞지 않음",
+                "이마": "피부 질감의 디테일이 부족함",
+                "턱": "얼굴 윤곽선이 부자연스러움",
+            }
+        else:
+            defaults = {
+                "왼쪽 눈": "자연스러운 동공 반사와 수분감이 관찰됨",
+                "오른쪽 눈": "자연스러운 눈의 디테일이 확인됨",
+                "왼쪽 볼": "자연스러운 피부결과 모공이 보임",
+                "오른쪽 볼": "실제 피부의 자연스러운 질감",
+                "입": "자연스러운 입술 질감",
+                "코": "자연스러운 음영과 하이라이트",
+                "이마": "자연스러운 피부 디테일",
+                "턱": "자연스러운 얼굴 윤곽",
+            }
+        return defaults.get(label, "분석 완료")
+
+    def _fallback_deepfake_analysis_with_markers(
+        self,
+        markers: list[dict],
+        is_deepfake: bool,
+        confidence: float
+    ) -> dict:
+        """마커 좌표를 유지하면서 기본 설명 추가"""
+        for marker in markers:
+            if not marker.get("description"):
+                marker["description"] = self._get_default_description(
+                    marker["label"], is_deepfake
+                )
+
+        if is_deepfake:
+            overall = f"딥페이크 확률 {confidence:.1f}%로 AI 생성 이미지로 의심됩니다."
+        else:
+            overall = f"실제 사진으로 판단됩니다 (신뢰도 {100-confidence:.1f}%)."
+
+        return {
+            "markers": markers,
+            "overall_assessment": overall
+        }
 
     def _fallback_deepfake_analysis(self, is_deepfake: bool, confidence: float) -> dict:
         """폴백 딥페이크 분석"""
         if is_deepfake:
             return {
                 "markers": [
-                    {"id": 1, "x": 40, "y": 32, "label": "왼쪽 눈", "description": "AI 생성 이미지에서 흔히 나타나는 부자연스러운 눈동자 반사 패턴이 감지됨"},
-                    {"id": 2, "x": 60, "y": 32, "label": "오른쪽 눈", "description": "양쪽 눈의 조명 반사가 비대칭적이며 물리적으로 일관성이 부족함"},
-                    {"id": 3, "x": 50, "y": 55, "label": "피부 질감", "description": "모공이나 자연스러운 피부 결이 보이지 않고 과도하게 매끄러움"}
+                    {"id": 1, "x": 38, "y": 42, "label": "왼쪽 눈", "description": "AI 생성 이미지에서 흔히 나타나는 부자연스러운 눈동자 반사 패턴이 감지됨"},
+                    {"id": 2, "x": 62, "y": 42, "label": "오른쪽 눈", "description": "양쪽 눈의 조명 반사가 비대칭적이며 물리적으로 일관성이 부족함"},
+                    {"id": 3, "x": 50, "y": 58, "label": "피부 질감", "description": "모공이나 자연스러운 피부 결이 보이지 않고 과도하게 매끄러움"}
                 ],
                 "overall_assessment": f"딥페이크 확률 {confidence:.1f}%로 AI 생성 이미지로 의심됩니다. 피부 질감, 눈 반사, 머리카락 경계 등에서 합성 흔적이 감지되었습니다."
             }
         else:
             return {
                 "markers": [
-                    {"id": 1, "x": 40, "y": 32, "label": "왼쪽 눈", "description": "자연스러운 동공 반사와 수분감이 관찰됨"},
-                    {"id": 2, "x": 60, "y": 32, "label": "오른쪽 눈", "description": "양쪽 눈의 조명 반사가 물리적으로 일관성 있음"},
-                    {"id": 3, "x": 50, "y": 50, "label": "피부", "description": "자연스러운 모공과 피부결이 관찰됨"}
+                    {"id": 1, "x": 38, "y": 42, "label": "왼쪽 눈", "description": "자연스러운 동공 반사와 수분감이 관찰됨"},
+                    {"id": 2, "x": 62, "y": 42, "label": "오른쪽 눈", "description": "양쪽 눈의 조명 반사가 물리적으로 일관성 있음"},
+                    {"id": 3, "x": 50, "y": 55, "label": "피부", "description": "자연스러운 모공과 피부결이 관찰됨"}
                 ],
                 "overall_assessment": f"실제 사진으로 판단됩니다 (신뢰도 {100-confidence:.1f}%). 자연스러운 피부 질감과 조명 반사가 확인되었습니다."
             }
+
+    async def analyze_deepfake_with_markers(
+        self,
+        image_data: bytes,
+        markers: list[dict],
+        is_deepfake: bool,
+        confidence: float
+    ) -> dict:
+        """EfficientViT에서 감지된 마커에 대한 설명 생성"""
+        if not self._client:
+            try:
+                await self.initialize()
+            except Exception as e:
+                logger.warning(f"OpenAI 초기화 실패: {e}")
+                return self._fallback_marker_descriptions(markers, is_deepfake, confidence)
+
+        if not self._client:
+            return self._fallback_marker_descriptions(markers, is_deepfake, confidence)
+
+        try:
+            base64_image = base64.b64encode(image_data).decode('utf-8')
+
+            system_message = """You are a digital media forensics expert.
+Analyze the marked regions in the image and explain what you observe.
+Respond in Korean with clear, technical explanations."""
+
+            # 마커 정보
+            marker_info = "\n".join([
+                f"- 영역 {m['id']}: {m['label']} (위치: x={m['x']}%, y={m['y']}%, 의심 강도: {m.get('intensity', 0):.2f})"
+                for m in markers
+            ])
+
+            if is_deepfake:
+                analysis_type = "AI 생성/합성 흔적"
+            else:
+                analysis_type = "자연스러운 특징"
+
+            prompt = f"""딥페이크 탐지 AI가 다음 영역들을 {'' if is_deepfake else '정상으로'} 표시했습니다:
+
+{marker_info}
+
+각 영역에서 **{analysis_type}**을 분석해주세요.
+이미지를 직접 보고 해당 위치에서 관찰되는 특징을 설명해주세요.
+
+JSON 형식으로만 응답:
+{{
+    "descriptions": {{
+        "1": "영역 1에 대한 분석 (1-2문장)",
+        "2": "영역 2에 대한 분석 (1-2문장)",
+        "3": "영역 3에 대한 분석 (1-2문장)"
+    }},
+    "overall_assessment": "종합 평가 (2문장)"
+}}"""
+
+            response = await self._client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}",
+                                    "detail": "high"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=600,
+            )
+
+            response_text = response.choices[0].message.content or ""
+            logger.info(f"OpenAI marker analysis response: {response_text[:500]}")
+
+            # JSON 파싱
+            cleaned = response_text
+            if "```json" in cleaned:
+                cleaned = re.sub(r'```json\s*', '', cleaned)
+                cleaned = re.sub(r'```\s*$', '', cleaned)
+            elif "```" in cleaned:
+                cleaned = re.sub(r'```\s*', '', cleaned)
+
+            json_match = re.search(r'\{[\s\S]*\}', cleaned)
+            if not json_match:
+                raise ValueError("No JSON found")
+
+            data = json.loads(json_match.group())
+            return {
+                "descriptions": data.get("descriptions", {}),
+                "overall_assessment": data.get("overall_assessment", "")
+            }
+
+        except Exception as e:
+            logger.error(f"Marker analysis failed: {e}")
+            return self._fallback_marker_descriptions(markers, is_deepfake, confidence)
+
+    def _fallback_marker_descriptions(
+        self,
+        markers: list[dict],
+        is_deepfake: bool,
+        confidence: float
+    ) -> dict:
+        """마커 설명 폴백"""
+        descriptions = {}
+        for marker in markers:
+            marker_id = str(marker["id"])
+            descriptions[marker_id] = self._get_default_description(
+                marker.get("label", "영역"), is_deepfake
+            )
+
+        if is_deepfake:
+            overall = f"딥페이크 확률 {confidence:.1f}%로 AI 생성 이미지로 의심됩니다."
+        else:
+            overall = f"실제 사진으로 판단됩니다 (신뢰도 {100-confidence:.1f}%)."
+
+        return {
+            "descriptions": descriptions,
+            "overall_assessment": overall
+        }

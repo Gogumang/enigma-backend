@@ -14,7 +14,12 @@ from src.infrastructure.external import (
     SightengineService,
     SocialMediaSearcher,
 )
-from src.infrastructure.persistence import JsonScammerRepository, QdrantScamRepository, ScammerNetworkRepository
+from src.infrastructure.persistence import (
+    JsonScammerRepository,
+    QdrantScamRepository,
+    ScammerNetworkRepository,
+    Neo4jRelationshipRepository,
+)
 
 # ==================== 서비스 싱글톤 ====================
 
@@ -46,6 +51,11 @@ def get_qdrant_repository() -> QdrantScamRepository:
 @lru_cache
 def get_scammer_network_repository() -> ScammerNetworkRepository:
     return ScammerNetworkRepository()
+
+
+@lru_cache
+def get_relationship_repository() -> Neo4jRelationshipRepository:
+    return Neo4jRelationshipRepository()
 
 
 @lru_cache
@@ -96,7 +106,8 @@ def get_analyze_video_use_case() -> AnalyzeVideoUseCase:
 def get_analyze_chat_use_case() -> AnalyzeChatUseCase:
     return AnalyzeChatUseCase(
         ai_service=get_openai_service(),
-        qdrant_repo=get_qdrant_repository()
+        qdrant_repo=get_qdrant_repository(),
+        relationship_repo=get_relationship_repository()
     )
 
 
@@ -143,3 +154,10 @@ async def initialize_services():
         await network_repo.initialize()
     except Exception as e:
         logger.warning(f"Neo4j 스캐머 네트워크 초기화 실패 (서버는 계속 동작): {e}")
+
+    # Neo4jRelationshipRepository 초기화 (사용자 관계 분석)
+    try:
+        relationship_repo = get_relationship_repository()
+        await relationship_repo.initialize()
+    except Exception as e:
+        logger.warning(f"Neo4j 관계 리포지토리 초기화 실패 (서버는 계속 동작): {e}")

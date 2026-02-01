@@ -1,4 +1,4 @@
-# Love Guard API
+# Enigma
 
 로맨스 스캠 예방을 위한 백엔드 API 서버
 
@@ -81,7 +81,7 @@ uv sync
 uv run python -m src.main
 
 # 또는 uvicorn 직접 사용
-uv run uvicorn src.main:app --reload --port 3001
+uv run uvicorn src.main:app --reload --port 4000
 ```
 
 #### pip 사용

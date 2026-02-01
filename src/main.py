@@ -1,9 +1,12 @@
 import logging
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.interfaces.api import (
     chat_router,
@@ -30,25 +33,25 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app: FastAPI):
     """애플리케이션 라이프사이클 관리"""
     # 시작 시
-    logger.info("Starting Love Guard API...")
+    logger.info("Starting Enigma API...")
     await initialize_services()
     logger.info("All services initialized")
 
     yield
 
     # 종료 시
-    logger.info("Shutting down Love Guard API...")
+    logger.info("Shutting down Enigma API...")
 
 
 # FastAPI 앱 생성
 app = FastAPI(
-    title="Love Guard API",
+    title="Enigma API",
     description="로맨스 스캠 예방 API - DDD Architecture",
     version="2.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # CORS 설정
@@ -94,6 +97,11 @@ async def general_exception_handler(_request: Request, exc: Exception):
     )
 
 
+# Static 파일 서빙 (페르소나 이미지 등)
+assets_path = Path(__file__).parent.parent / "assets"
+if assets_path.exists():
+    app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
+
 # 라우터 등록 (prefix: /api)
 app.include_router(profile_router, prefix="/api")
 app.include_router(deepfake_router, prefix="/api")
@@ -109,7 +117,7 @@ app.include_router(url_router, prefix="/api")
 async def health_check():
     return {
         "status": "healthy",
-        "service": "Love Guard API",
+        "service": "Enigma API",
         "version": "2.0.0"
     }
 
@@ -118,7 +126,7 @@ async def health_check():
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to Love Guard API",
+        "message": "Welcome to Enigma API",
         "docs": "/api/docs"
     }
 
@@ -128,8 +136,8 @@ if __name__ == "__main__":
 
     print(f"""
     ╔═══════════════════════════════════════════╗
-    ║         Love Guard API v2.0.0             ║
-    ║         DDD Architecture + FastAPI        ║
+    ║           Enigma API v2.0.0               ║
+    ║       DDD Architecture + FastAPI          ║
     ╠═══════════════════════════════════════════╣
     ║  Server: http://localhost:{settings.port}            ║
     ║  Docs:   http://localhost:{settings.port}/api/docs   ║

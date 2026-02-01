@@ -5,16 +5,24 @@ Neo4j 기반 스캐머 네트워크 분석 리포지토리
 - 연관 스캐머 찾기
 """
 import logging
-import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
 from neo4j import AsyncGraphDatabase
 
 from src.shared.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SnsProfile:
+    """SNS 프로필 정보"""
+    platform: str  # instagram, facebook, linkedin, tiktok, etc.
+    profile_url: str
+    profile_name: str | None = None
+    username: str | None = None
+    image_url: str | None = None  # 프로필 이미지 또는 발견된 이미지
 
 
 @dataclass
@@ -28,9 +36,17 @@ class ScammerReport:
     # 연결 정보 (옵션)
     phone_numbers: list[str] = field(default_factory=list)
     bank_accounts: list[str] = field(default_factory=list)
-    profile_photo_hash: Optional[str] = None
-    damage_amount: Optional[int] = None
+    profile_photo_hash: str | None = None
+    damage_amount: int | None = None
     scam_patterns: list[str] = field(default_factory=list)
+    # SNS 프로필 (새로 추가)
+    sns_profiles: list[SnsProfile] = field(default_factory=list)
+    # 발견된 이미지 URLs
+    found_image_urls: list[str] = field(default_factory=list)
+    # 원본 이미지 (base64)
+    original_image_base64: str | None = None
+    # 얼굴 임베딩 (나중에 매칭용)
+    face_embedding: list[float] | None = None
 
 
 @dataclass
@@ -90,6 +106,11 @@ class ScammerNetworkRepository:
                 "CREATE INDEX account_number IF NOT EXISTS FOR (a:BankAccount) ON (a.number)",
                 "CREATE INDEX phone_number IF NOT EXISTS FOR (p:Phone) ON (p.number)",
                 "CREATE INDEX profile_hash IF NOT EXISTS FOR (pr:ProfilePhoto) ON (pr.hash)",
+                # SNS 프로필 인덱스 추가
+                "CREATE INDEX sns_profile_url IF NOT EXISTS FOR (sp:SnsProfile) ON (sp.url)",
+                "CREATE INDEX sns_profile_platform IF NOT EXISTS FOR (sp:SnsProfile) ON (sp.platform)",
+                # 발견된 이미지 인덱스
+                "CREATE INDEX found_image_url IF NOT EXISTS FOR (fi:FoundImage) ON (fi.url)",
             ]
 
             for query in constraints_and_indexes:
@@ -224,7 +245,7 @@ class ScammerNetworkRepository:
             return ""
 
         async with self._driver.session() as session:
-            # 1. 스캐머 노드 생성
+            # 1. 스캐머 노드 생성 (원본 이미지와 임베딩 포함)
             await session.run(
                 """
                 MERGE (s:Scammer {id: $id})
@@ -232,14 +253,18 @@ class ScammerNetworkRepository:
                     s.profile_name = $profile_name,
                     s.description = $description,
                     s.reported_at = datetime($reported_at),
-                    s.damage_amount = $damage_amount
+                    s.damage_amount = $damage_amount,
+                    s.original_image = $original_image,
+                    s.face_embedding = $face_embedding
                 """,
                 id=report.id,
                 platform=report.platform,
                 profile_name=report.profile_name,
                 description=report.description,
                 reported_at=report.reported_at.isoformat(),
-                damage_amount=report.damage_amount
+                damage_amount=report.damage_amount,
+                original_image=report.original_image_base64,
+                face_embedding=report.face_embedding
             )
 
             # 2. 계좌번호 연결
@@ -294,7 +319,42 @@ class ScammerNetworkRepository:
                     scammer_id=report.id
                 )
 
-            logger.info(f"Scammer reported: {report.id}")
+            # 6. SNS 프로필 연결 (새로 추가)
+            for sns in report.sns_profiles:
+                await session.run(
+                    """
+                    MERGE (sp:SnsProfile {url: $url})
+                    SET sp.platform = $platform,
+                        sp.profile_name = $profile_name,
+                        sp.username = $username,
+                        sp.image_url = $image_url
+                    WITH sp
+                    MATCH (s:Scammer {id: $scammer_id})
+                    MERGE (s)-[:HAS_SNS_PROFILE]->(sp)
+                    """,
+                    url=sns.profile_url,
+                    platform=sns.platform,
+                    profile_name=sns.profile_name,
+                    username=sns.username,
+                    image_url=sns.image_url,
+                    scammer_id=report.id
+                )
+
+            # 7. 발견된 이미지 URL 연결 (새로 추가)
+            for image_url in report.found_image_urls:
+                await session.run(
+                    """
+                    MERGE (fi:FoundImage {url: $url})
+                    SET fi.discovered_at = datetime()
+                    WITH fi
+                    MATCH (s:Scammer {id: $scammer_id})
+                    MERGE (s)-[:FOUND_IN_IMAGE]->(fi)
+                    """,
+                    url=image_url,
+                    scammer_id=report.id
+                )
+
+            logger.info(f"Scammer reported: {report.id} with {len(report.sns_profiles)} SNS profiles")
             return report.id
 
     # ==================== 네트워크 분석 ====================
@@ -489,6 +549,136 @@ class ScammerNetworkRepository:
                     "profile_name": r["s"].get("profile_name", ""),
                     "description": r["s"].get("description", ""),
                     "damage_amount": r["s"].get("damage_amount", 0),
+                }
+                for r in records
+            ]
+
+    async def find_by_sns_url(self, sns_url: str) -> list[dict]:
+        """SNS 프로필 URL로 연관 스캐머 찾기"""
+        if not self._driver:
+            return []
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (s:Scammer)-[:HAS_SNS_PROFILE]->(sp:SnsProfile)
+                WHERE sp.url CONTAINS $url_part
+                RETURN s, collect(sp) as profiles
+                ORDER BY s.reported_at DESC
+                """,
+                url_part=sns_url
+            )
+
+            records = await result.data()
+            return [
+                {
+                    "id": r["s"]["id"],
+                    "platform": r["s"].get("platform", ""),
+                    "profile_name": r["s"].get("profile_name", ""),
+                    "description": r["s"].get("description", ""),
+                    "damage_amount": r["s"].get("damage_amount", 0),
+                    "sns_profiles": [
+                        {
+                            "platform": p.get("platform", ""),
+                            "url": p.get("url", ""),
+                            "username": p.get("username", ""),
+                        }
+                        for p in r["profiles"]
+                    ]
+                }
+                for r in records
+            ]
+
+    async def get_scammer_detail(self, scammer_id: str) -> dict | None:
+        """스캐머 상세 정보 (SNS 프로필, 발견된 이미지 포함)"""
+        if not self._driver:
+            return None
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (s:Scammer {id: $id})
+                OPTIONAL MATCH (s)-[:HAS_SNS_PROFILE]->(sp:SnsProfile)
+                OPTIONAL MATCH (s)-[:FOUND_IN_IMAGE]->(fi:FoundImage)
+                OPTIONAL MATCH (s)-[:USED_PHONE]->(p:Phone)
+                OPTIONAL MATCH (s)-[:USED_ACCOUNT]->(a:BankAccount)
+                OPTIONAL MATCH (s)-[:USED_PATTERN]->(pat:ScamPattern)
+                RETURN s,
+                       collect(DISTINCT sp) as sns_profiles,
+                       collect(DISTINCT fi) as found_images,
+                       collect(DISTINCT p.number) as phones,
+                       collect(DISTINCT a.number) as accounts,
+                       collect(DISTINCT pat.name) as patterns
+                """,
+                id=scammer_id
+            )
+
+            record = await result.single()
+            if not record:
+                return None
+
+            scammer = record["s"]
+            return {
+                "id": scammer["id"],
+                "platform": scammer.get("platform", ""),
+                "profile_name": scammer.get("profile_name", ""),
+                "description": scammer.get("description", ""),
+                "damage_amount": scammer.get("damage_amount", 0),
+                "original_image": scammer.get("original_image"),
+                "reported_at": str(scammer.get("reported_at", "")),
+                "sns_profiles": [
+                    {
+                        "platform": sp.get("platform", ""),
+                        "url": sp.get("url", ""),
+                        "profile_name": sp.get("profile_name", ""),
+                        "username": sp.get("username", ""),
+                        "image_url": sp.get("image_url", ""),
+                    }
+                    for sp in record["sns_profiles"] if sp
+                ],
+                "found_images": [
+                    {
+                        "url": fi.get("url", ""),
+                        "discovered_at": str(fi.get("discovered_at", "")),
+                    }
+                    for fi in record["found_images"] if fi
+                ],
+                "phones": [p for p in record["phones"] if p],
+                "accounts": [a for a in record["accounts"] if a],
+                "patterns": [p for p in record["patterns"] if p],
+            }
+
+    async def list_scammers(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        """스캐머 목록 조회"""
+        if not self._driver:
+            return []
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (s:Scammer)
+                OPTIONAL MATCH (s)-[:HAS_SNS_PROFILE]->(sp:SnsProfile)
+                WITH s, count(sp) as sns_count
+                RETURN s, sns_count
+                ORDER BY s.reported_at DESC
+                SKIP $offset
+                LIMIT $limit
+                """,
+                limit=limit,
+                offset=offset
+            )
+
+            records = await result.data()
+            return [
+                {
+                    "id": r["s"]["id"],
+                    "platform": r["s"].get("platform", ""),
+                    "profile_name": r["s"].get("profile_name", ""),
+                    "description": r["s"].get("description", ""),
+                    "damage_amount": r["s"].get("damage_amount", 0),
+                    "original_image": r["s"].get("original_image"),
+                    "reported_at": str(r["s"].get("reported_at", "")),
+                    "sns_profile_count": r["sns_count"],
                 }
                 for r in records
             ]

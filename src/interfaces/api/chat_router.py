@@ -1,13 +1,16 @@
 from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel
+from typing import Optional
 
 from src.application.chat import AnalyzeChatUseCase, ChatbotUseCase, GetPatternsUseCase
+from src.infrastructure.persistence import RelationshipType
 from src.interfaces.api.dependencies import (
     get_analyze_chat_use_case,
     get_chatbot_use_case,
     get_patterns_use_case,
     get_openai_service,
     get_qdrant_repository,
+    get_relationship_repository,
 )
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -15,6 +18,8 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class AnalyzeRequest(BaseModel):
     messages: list[str]
+    sender_id: str | None = None      # 메시지 발신자 ID (관계 분석용)
+    receiver_id: str | None = None    # 메시지 수신자 ID (관계 분석용)
 
 
 class ChatRequest(BaseModel):
@@ -41,7 +46,11 @@ async def analyze_chat(
         )
 
     try:
-        result = await use_case.execute(request.messages)
+        result = await use_case.execute(
+            messages=request.messages,
+            sender_id=request.sender_id,
+            receiver_id=request.receiver_id
+        )
 
         response_data = {
             "riskScore": result.risk_score,
@@ -60,6 +69,14 @@ async def analyze_chat(
         # 파싱된 메시지 추가
         if result.parsed_messages:
             response_data["parsedMessages"] = result.parsed_messages
+
+        # 관계 분석 컨텍스트 추가
+        if result.relationship_context:
+            response_data["relationshipContext"] = result.relationship_context
+
+        # 원본 위험도 (관계 조정 전)
+        if result.raw_risk_score is not None:
+            response_data["rawRiskScore"] = result.raw_risk_score
 
         return ChatResponse(
             success=True,
@@ -174,5 +191,129 @@ async def get_patterns(
         "success": True,
         "data": {
             "patterns": patterns
+        }
+    }
+
+
+# ==================== 관계 관리 API ====================
+
+class SetRelationshipRequest(BaseModel):
+    user_id: str
+    other_user_id: str
+    relationship_type: str  # friend, close_friend, family, lover, acquaintance, online_friend, matched, stranger
+    trust_level: Optional[float] = None  # 0.0 ~ 1.0, None이면 기본값 사용
+    platform: Optional[str] = None  # tinder, bumble, etc.
+
+
+class GetRelationshipRequest(BaseModel):
+    user_id: str
+    other_user_id: str
+
+
+@router.post("/relationship/set", response_model=ChatResponse)
+async def set_relationship(request: SetRelationshipRequest):
+    """사용자 간 관계 설정"""
+    try:
+        repo = get_relationship_repository()
+
+        if not repo.is_connected():
+            return ChatResponse(
+                success=False,
+                error="관계 DB가 연결되지 않았습니다"
+            )
+
+        # 관계 유형 변환
+        try:
+            rel_type = RelationshipType(request.relationship_type)
+        except ValueError:
+            valid_types = [t.value for t in RelationshipType]
+            return ChatResponse(
+                success=False,
+                error=f"유효하지 않은 관계 유형입니다. 사용 가능: {valid_types}"
+            )
+
+        success = await repo.set_relationship(
+            user_id=request.user_id,
+            other_user_id=request.other_user_id,
+            relationship_type=rel_type,
+            trust_level=request.trust_level,
+            platform=request.platform
+        )
+
+        if success:
+            return ChatResponse(
+                success=True,
+                data={
+                    "message": f"관계 설정 완료: {request.user_id} -> {request.other_user_id} ({rel_type.value})"
+                }
+            )
+        else:
+            return ChatResponse(success=False, error="관계 설정 실패")
+
+    except Exception as e:
+        return ChatResponse(success=False, error=str(e))
+
+
+@router.post("/relationship/get", response_model=ChatResponse)
+async def get_relationship(request: GetRelationshipRequest):
+    """사용자 간 관계 조회"""
+    try:
+        repo = get_relationship_repository()
+
+        if not repo.is_connected():
+            return ChatResponse(
+                success=False,
+                error="관계 DB가 연결되지 않았습니다"
+            )
+
+        relationship = await repo.get_relationship(
+            user_id=request.user_id,
+            other_user_id=request.other_user_id
+        )
+
+        if relationship:
+            return ChatResponse(
+                success=True,
+                data={
+                    "relationship": {
+                        "type": relationship.relationship_type.value,
+                        "trustLevel": relationship.trust_level,
+                        "knownSince": relationship.known_since.isoformat() if relationship.known_since else None,
+                        "interactionCount": relationship.interaction_count,
+                        "financialRequestCount": relationship.financial_request_count,
+                        "platform": relationship.platform
+                    }
+                }
+            )
+        else:
+            return ChatResponse(
+                success=True,
+                data={
+                    "relationship": None,
+                    "message": "등록된 관계가 없습니다"
+                }
+            )
+
+    except Exception as e:
+        return ChatResponse(success=False, error=str(e))
+
+
+@router.get("/relationship/types")
+async def get_relationship_types():
+    """사용 가능한 관계 유형 목록"""
+    return {
+        "success": True,
+        "data": {
+            "types": [
+                {"value": "friend", "label": "친구", "defaultTrust": 0.8},
+                {"value": "close_friend", "label": "절친", "defaultTrust": 0.9},
+                {"value": "family", "label": "가족", "defaultTrust": 0.95},
+                {"value": "lover", "label": "연인", "defaultTrust": 0.85},
+                {"value": "acquaintance", "label": "지인", "defaultTrust": 0.5},
+                {"value": "online_friend", "label": "온라인 친구", "defaultTrust": 0.4},
+                {"value": "matched", "label": "매칭앱에서 만남", "defaultTrust": 0.2},
+                {"value": "stranger", "label": "모르는 사람", "defaultTrust": 0.1},
+                {"value": "unknown", "label": "관계 불명", "defaultTrust": 0.3},
+            ]
         }
     }
