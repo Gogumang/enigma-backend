@@ -74,14 +74,17 @@ DEFAULT_TRUST_LEVELS = {
     RelationshipType.UNKNOWN: 0.3,
 }
 
-# 맥락별 위험도 수정자 (낮을수록 위험)
+# 맥락별 위험도 수정자 (낮을수록 위험도 낮춤 = 안전)
 CONTEXT_MODIFIERS = {
-    "gaming": 0.3,      # 게임 관련 → 위험도 낮춤
-    "work": 0.5,        # 업무 관련
-    "casual": 0.4,      # 일상 대화
-    "dating": 0.8,      # 데이팅 → 주의 필요
-    "financial": 1.0,   # 금융 관련 → 높은 주의
-    "emergency": 0.9,   # 긴급 상황 → 주의 필요
+    "gaming_betting": 0.1,   # 게임 내기 → 위험도 대폭 낮춤 (친구 대화)
+    "friend_casual": 0.15,   # 친구 캐주얼 대화 → 위험도 대폭 낮춤
+    "gaming": 0.2,           # 일반 게임 관련 → 위험도 낮춤
+    "work": 0.4,             # 업무 관련
+    "casual": 0.3,           # 일상 대화
+    "dating": 0.7,           # 데이팅 → 주의 필요
+    "financial": 0.8,        # 일반 금융 관련 → 주의 필요
+    "financial_scam": 1.0,   # 스캠 의심 금융 → 최고 주의
+    "emergency": 0.9,        # 긴급 상황 → 높은 주의
 }
 
 
@@ -286,28 +289,94 @@ class Neo4jRelationshipRepository:
     # ==================== 대화 맥락 분석 ====================
 
     def detect_context(self, message: str) -> ConversationContext:
-        """메시지에서 대화 맥락 감지"""
+        """메시지에서 대화 맥락 감지 (강화된 패턴)"""
         message_lower = message.lower()
 
-        # 맥락별 키워드
+        # 맥락별 키워드 (우선순위 순서로 정렬)
         context_keywords = {
-            "gaming": ["롤", "게임", "스킨", "lol", "배그", "오버워치", "발로란트", "steam", "닌텐도", "플스", "엑박"],
-            "work": ["회사", "업무", "미팅", "프로젝트", "출장", "야근", "월급", "보고서"],
-            "financial": ["투자", "코인", "주식", "수익", "원금", "이자", "대출", "송금"],
-            "emergency": ["급해", "긴급", "사고", "병원", "아파", "도와줘"],
-            "dating": ["데이트", "만나", "사랑", "보고싶", "연애"],
-            "casual": ["밥", "뭐해", "심심", "ㅋㅋ", "ㅎㅎ"],
+            # 게임/내기 - 가장 높은 우선순위 (친구 대화 신호)
+            "gaming_betting": [
+                "롤", "lol", "배그", "pubg", "오버워치", "발로란트", "게임",
+                "한판", "듀오", "솔랭", "랭크", "피드", "캐리",
+                "빵", "내기", "만원빵", "만원 빵", "오천빵", "천원빵",
+                "졌", "이겼", "내놔", "한턱", "빵셔틀",
+                "ㄱ?", "ㄱㄱ", "ㄴㄴ", "고고", "ㅇㅋ"
+            ],
+            # 친구 캐주얼 대화
+            "friend_casual": [
+                "ㅋㅋ", "ㅎㅎ", "ㅋㅋㅋ", "ㅎㅎㅎ", "ㅋㅋㅋㅋ",
+                "ㄴㄴ", "ㅇㅇ", "ㅇㅋ", "ㄱㅊ", "ㅈㅅ",
+                "뭐해", "심심", "야", "님", "ㅅㅂ", "ㅁㅊ",
+                "뒤졌", "죽었", "각오해", "두고봐",
+                "사줘", "밥", "커피", "술", "치킨"
+            ],
+            # 일반 게임 (내기 없이)
+            "gaming": [
+                "스팀", "steam", "닌텐도", "플스", "엑박", "xbox",
+                "마크", "마인크래프트", "리그오브레전드", "스타크래프트",
+                "스킨", "아이템", "뽑기", "가챠", "과금"
+            ],
+            # 업무
+            "work": [
+                "회사", "업무", "미팅", "프로젝트", "출장", "야근",
+                "월급", "보고서", "상사", "부장님", "팀장님", "회의"
+            ],
+            # 로맨스 스캠 의심 - 금융
+            "financial_scam": [
+                "투자 기회", "원금 보장", "고수익", "비트코인 투자",
+                "코인 투자", "수익률", "배당", "리딩방"
+            ],
+            # 일반 금융 (친구 간 송금은 gaming_betting에서 처리)
+            "financial": [
+                "투자", "코인", "주식", "수익", "원금", "이자", "대출"
+            ],
+            # 긴급 상황 (스캠 의심)
+            "emergency": [
+                "급해", "긴급", "사고가 났", "병원비", "수술비",
+                "아파서", "도와줘", "지금 당장"
+            ],
+            # 데이팅/로맨스
+            "dating": [
+                "데이트", "사랑해", "보고싶", "연애", "썸",
+                "운명", "소울메이트", "첫눈에"
+            ],
+            # 캐주얼 (기본)
+            "casual": [
+                "뭐해", "심심", "안녕"
+            ],
         }
 
+        # 우선순위: gaming_betting > friend_casual > 나머지
+        priority_order = [
+            "gaming_betting", "friend_casual", "gaming",
+            "work", "financial_scam", "financial",
+            "emergency", "dating", "casual"
+        ]
+
         detected_contexts = []
-        for context_type, keywords in context_keywords.items():
+        for context_type in priority_order:
+            keywords = context_keywords.get(context_type, [])
             matched = [kw for kw in keywords if kw in message_lower]
             if matched:
-                confidence = min(1.0, len(matched) * 0.3)
+                # 매칭된 키워드 수에 따른 신뢰도
+                confidence = min(1.0, len(matched) * 0.25)
+                # 특정 맥락은 가중치 부여
+                if context_type in ["gaming_betting", "friend_casual"]:
+                    confidence = min(1.0, confidence * 1.5)  # 친구 대화 맥락 가중치
                 detected_contexts.append((context_type, matched, confidence))
 
         if detected_contexts:
-            # 가장 높은 confidence 선택
+            # 우선순위와 confidence 고려
+            # gaming_betting이나 friend_casual이 감지되면 최우선
+            for ctx in detected_contexts:
+                if ctx[0] in ["gaming_betting", "friend_casual"] and ctx[2] >= 0.3:
+                    return ConversationContext(
+                        context_type=ctx[0],
+                        keywords=ctx[1],
+                        confidence=ctx[2]
+                    )
+
+            # 그 외는 가장 높은 confidence 선택
             detected_contexts.sort(key=lambda x: x[2], reverse=True)
             best = detected_contexts[0]
             return ConversationContext(
@@ -319,7 +388,7 @@ class Neo4jRelationshipRepository:
         return ConversationContext(
             context_type="casual",
             keywords=[],
-            confidence=0.5
+            confidence=0.3
         )
 
     # ==================== 종합 분석 ====================
@@ -373,16 +442,32 @@ class Neo4jRelationshipRepository:
         # 4. 맥락 기반 수정
         context_modifier = CONTEXT_MODIFIERS.get(context.context_type, 0.5)
 
-        if context.context_type == "gaming":
+        # 맥락별 보호/위험 요소 추가
+        if context.context_type == "gaming_betting":
+            protective_factors.append(f"게임 내기 맥락 감지 (키워드: {', '.join(context.keywords)})")
+            protective_factors.append("친구 간 일상적인 게임 내기로 판단됨")
+            # 게임 내기 맥락에서는 신뢰도 대폭 상승
+            base_trust = min(1.0, base_trust + 0.4)
+        elif context.context_type == "friend_casual":
+            protective_factors.append(f"친구 캐주얼 대화 감지 (키워드: {', '.join(context.keywords)})")
+            protective_factors.append("친구/지인 간 일상 대화로 판단됨")
+            base_trust = min(1.0, base_trust + 0.3)
+        elif context.context_type == "gaming":
             protective_factors.append(f"게임 관련 대화 (키워드: {', '.join(context.keywords)})")
+        elif context.context_type == "financial_scam":
+            risk_factors.append("스캠 의심 금융 패턴 감지")
+            risk_factors.append(f"위험 키워드: {', '.join(context.keywords)}")
         elif context.context_type == "financial":
             risk_factors.append("금융/투자 관련 대화")
         elif context.context_type == "emergency":
             risk_factors.append("긴급 상황 언급")
+        elif context.context_type == "dating":
+            risk_factors.append("로맨스/데이팅 맥락 - 주의 필요")
 
         # 5. 최종 신뢰도 수정자 계산
         # trust_modifier가 높을수록 위험도가 낮아짐
-        trust_modifier = base_trust * (1 - context_modifier * 0.3)
+        # context_modifier가 낮을수록 (친구 대화) 신뢰도가 높아짐
+        trust_modifier = base_trust * (1 - context_modifier * 0.5)
 
         return RelationshipAnalysisResult(
             relationship=relationship,

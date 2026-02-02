@@ -112,22 +112,48 @@ class AnalyzeChatUseCase:
                     logger.warning(f"{name} 조회 실패: {result}")
                     interpretation_steps.append(f"{name} 조회 실패")
                 elif name == "qdrant":
+                    # 위험 패턴과 안전 패턴 모두 포함
+                    matched_phrases = [
+                        {
+                            "text": p["text"],
+                            "category": p["category"],
+                            "severity": p["severity"],
+                            "description": p["description"],
+                            "similarity": p["similarity"],
+                            "is_safe": p.get("is_safe", False),
+                        }
+                        for p in result.matched_patterns
+                    ]
+
+                    # 안전 패턴 추가
+                    safe_phrases = [
+                        {
+                            "text": p["text"],
+                            "category": p["category"],
+                            "severity": p["severity"],
+                            "description": p["description"],
+                            "similarity": p["similarity"],
+                            "is_safe": True,
+                        }
+                        for p in result.safe_patterns
+                    ]
+
                     rag_context = RAGContext(
-                        matched_phrases=[
-                            {
-                                "text": p["text"],
-                                "category": p["category"],
-                                "severity": p["severity"],
-                                "description": p["description"],
-                                "similarity": p["similarity"],
-                            }
-                            for p in result.matched_patterns
-                        ],
+                        matched_phrases=matched_phrases + safe_phrases,
                         similar_cases=[],
                         risk_indicators=result.risk_indicators,
                         total_reports=0,
                     )
-                    interpretation_steps.append(f"벡터 검색 완료: {len(result.matched_patterns)}개 유사 패턴")
+
+                    # 보호 지표도 기록
+                    if result.protective_indicators:
+                        for indicator in result.protective_indicators[:3]:
+                            interpretation_steps.append(f"✓ {indicator}")
+
+                    interpretation_steps.append(
+                        f"벡터 검색 완료: {len(result.matched_patterns)}개 위험 패턴, "
+                        f"{len(result.safe_patterns)}개 안전 패턴"
+                    )
                 elif name == "neo4j":
                     relationship_result = result
                     if result.relationship:
@@ -142,10 +168,31 @@ class AnalyzeChatUseCase:
                         )
 
         # 3. AI 분석 (OpenAI 또는 Gemini)
+        # 관계/맥락 정보를 AI에 전달
+        relationship_context_for_ai = None
+        if relationship_result:
+            relationship_context_for_ai = {
+                "relationship": {
+                    "type": relationship_result.relationship.relationship_type.value,
+                    "trust_level": relationship_result.relationship.trust_level,
+                    "interaction_count": relationship_result.relationship.interaction_count,
+                    "financial_request_count": relationship_result.relationship.financial_request_count,
+                } if relationship_result.relationship else None,
+                "context": {
+                    "type": relationship_result.context.context_type,
+                    "keywords": relationship_result.context.keywords,
+                    "confidence": relationship_result.context.confidence,
+                } if relationship_result.context else None,
+                "trust_modifier": relationship_result.trust_modifier,
+                "risk_factors": relationship_result.risk_factors,
+                "protective_factors": relationship_result.protective_factors,
+            }
+
         result = await self.ai_service.analyze_chat(
             messages=messages,
             rag_context=rag_context,
-            parsed_messages=parsed_messages
+            parsed_messages=parsed_messages,
+            relationship_context=relationship_context_for_ai
         )
 
         # 4. 관계 기반 위험도 조정

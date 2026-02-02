@@ -27,8 +27,9 @@ class AnalysisResponse(BaseModel):
 def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
     # 히트맵 추출 (details에서)
     heatmap_base64 = None
-    if result.details and "heatmap_base64" in result.details:
-        heatmap_base64 = result.details.pop("heatmap_base64")
+    details_copy = dict(result.details) if result.details else {}
+    if "heatmap_base64" in details_copy:
+        heatmap_base64 = details_copy.pop("heatmap_base64")
 
     return {
         "isDeepfake": result.is_deepfake,
@@ -36,7 +37,7 @@ def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
         "riskLevel": result.risk_level,
         "mediaType": result.media_type,
         "message": result.message,
-        "details": result.details,
+        "details": details_copy,
         "analysisReasons": result.analysis_reasons,
         "markers": result.markers,
         "technicalIndicators": result.technical_indicators,
@@ -48,6 +49,9 @@ def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
         "blurScore": result.blur_score,
         "qualityWarning": result.quality_warning,
         "isReliable": result.is_reliable,
+        # 알고리즘 검사 결과 (신규)
+        "algorithmChecks": result.algorithm_checks,
+        "ensembleDetails": result.ensemble_details,
     }
 
 

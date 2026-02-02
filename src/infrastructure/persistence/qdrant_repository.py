@@ -30,21 +30,24 @@ EMBEDDING_DIM = 1536
 
 @dataclass
 class ScamPattern:
-    """스캠 패턴"""
+    """스캠 패턴 (위험 패턴 + 안전 패턴)"""
     id: str
     text: str
-    category: str  # love_bombing, financial_request, urgency, etc.
-    severity: int  # 1-10
+    category: str  # love_bombing, financial_request, friend_gaming, friend_betting, etc.
+    severity: int  # 1-10 (안전 패턴은 음수 사용: -10 ~ -1)
     description: str
     examples: list[str]
+    is_safe: bool = False  # True면 정상/안전 패턴
 
 
 @dataclass
 class RAGResult:
     """RAG 조회 결과"""
     matched_patterns: list[dict]
+    safe_patterns: list[dict]  # 매칭된 안전 패턴
     risk_score: int
     risk_indicators: list[str]
+    protective_indicators: list[str]  # 보호 지표
 
 
 class QdrantScamRepository:
@@ -249,6 +252,91 @@ class QdrantScamRepository:
                 description="만남 약속을 반복하지만 실현하지 않음",
                 examples=["다음 달에 가", "휴가 나오면 만나", "곧 전역해"]
             ),
+
+            # ==================== 정상/안전 패턴 (친구 대화) ====================
+
+            # 게임 내기 패턴 (안전)
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="야 롤 한판 ㄱ?",
+                category="friend_gaming",
+                severity=-8,
+                description="친구 간 게임 제안 - 정상적인 대화",
+                examples=["롤 ㄱ?", "한판 할래?", "듀오 ㄱㄱ", "랭크 돌리자"],
+                is_safe=True
+            ),
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="졌으니까 만원 내놔",
+                category="friend_betting",
+                severity=-9,
+                description="친구 간 게임 내기 결과 - 정상적인 대화",
+                examples=["내기 졌으니까 내놔", "만원빵", "빵 내놔", "한턱 쏴"],
+                is_safe=True
+            ),
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="이겼으니까 계좌번호 보내",
+                category="friend_betting",
+                severity=-9,
+                description="친구 간 게임 내기 후 송금 요청 - 정상적인 대화",
+                examples=["계좌 보내", "계좌번호 알려줘", "카카오페이로 보내"],
+                is_safe=True
+            ),
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="넌 뒤졌다 ㅋㅋㅋ",
+                category="friend_casual",
+                severity=-7,
+                description="친구 간 장난 - 정상적인 대화",
+                examples=["죽었어", "각오해", "두고봐", "나한테 안돼"],
+                is_safe=True
+            ),
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="치킨 사줘",
+                category="friend_casual",
+                severity=-6,
+                description="친구 간 밥/음식 사달라는 요청 - 정상적인 대화",
+                examples=["밥 사줘", "커피 사줘", "한턱내", "쏴라"],
+                is_safe=True
+            ),
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="심심한데 뭐해",
+                category="friend_casual",
+                severity=-5,
+                description="친구 간 안부 인사 - 정상적인 대화",
+                examples=["뭐해?", "심심해", "놀자", "시간 있어?"],
+                is_safe=True
+            ),
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="ㅋㅋㅋㅋ 진짜?",
+                category="friend_casual",
+                severity=-5,
+                description="친구 간 반응 - 정상적인 대화",
+                examples=["ㅎㅎㅎ", "ㄹㅇ?", "ㄴㄴ", "ㅇㅇ", "ㅇㅋ"],
+                is_safe=True
+            ),
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="택시비 좀 빌려줘 나중에 갚을게",
+                category="friend_money",
+                severity=-4,
+                description="친구 간 소액 빌리기 - 맥락에 따라 정상",
+                examples=["만원만 빌려줘", "점심값 좀", "교통비 좀"],
+                is_safe=True
+            ),
+            ScamPattern(
+                id=str(uuid.uuid4()),
+                text="오늘 저녁에 만나자",
+                category="friend_meetup",
+                severity=-6,
+                description="친구 간 만남 약속 - 정상적인 대화",
+                examples=["언제 볼래?", "주말에 만나자", "오랜만에 보자"],
+                is_safe=True
+            ),
         ]
 
         points = []
@@ -266,6 +354,7 @@ class QdrantScamRepository:
                     "severity": pattern.severity,
                     "description": pattern.description,
                     "examples": pattern.examples,
+                    "is_safe": pattern.is_safe,
                 }
             ))
 
@@ -279,36 +368,43 @@ class QdrantScamRepository:
     def is_connected(self) -> bool:
         return self._qdrant is not None
 
-    async def search_similar(self, text: str, limit: int = 5) -> RAGResult:
-        """텍스트와 유사한 스캠 패턴 검색"""
+    async def search_similar(self, text: str, limit: int = 10) -> RAGResult:
+        """텍스트와 유사한 패턴 검색 (위험 + 안전 패턴)"""
         if not self._qdrant or not self._openai:
             return RAGResult(
                 matched_patterns=[],
+                safe_patterns=[],
                 risk_score=0,
-                risk_indicators=[]
+                risk_indicators=[],
+                protective_indicators=[]
             )
 
         try:
             # 입력 텍스트 임베딩
             query_embedding = self._get_embedding(text)
 
-            # 유사도 검색 (qdrant-client 1.7+에서 search -> query_points로 변경됨)
+            # 유사도 검색 (더 많이 가져와서 안전/위험 패턴 모두 확인)
             response = self._qdrant.query_points(
                 collection_name=COLLECTION_NAME,
                 query=query_embedding,
                 limit=limit,
-                score_threshold=0.3,  # 최소 유사도 30%
+                score_threshold=0.25,  # 최소 유사도 25%
             )
             results = response.points
 
-            matched_patterns = []
+            matched_patterns = []  # 위험 패턴
+            safe_patterns = []     # 안전 패턴
             total_severity = 0
+            safe_score = 0
             risk_indicators = []
+            protective_indicators = []
             categories_found = set()
+            safe_categories_found = set()
 
             for result in results:
                 payload = result.payload
                 similarity = result.score
+                is_safe = payload.get("is_safe", False)
 
                 pattern_info = {
                     "text": payload["text"],
@@ -316,48 +412,96 @@ class QdrantScamRepository:
                     "severity": payload["severity"],
                     "description": payload["description"],
                     "similarity": round(similarity * 100, 1),
+                    "is_safe": is_safe,
                 }
-                matched_patterns.append(pattern_info)
 
-                # 위험도 계산
-                weighted_severity = payload["severity"] * similarity
-                total_severity += weighted_severity
-                categories_found.add(payload["category"])
+                if is_safe:
+                    # 안전 패턴
+                    safe_patterns.append(pattern_info)
 
-                # 위험 지표 생성
-                if similarity >= 0.7:
-                    risk_indicators.append(
-                        f"'{payload['text']}' 패턴과 {similarity*100:.0f}% 유사 - {payload['description']}"
+                    # 안전 점수 계산 (음수 severity의 절댓값 사용)
+                    weighted_safe = abs(payload["severity"]) * similarity
+                    safe_score += weighted_safe
+                    safe_categories_found.add(payload["category"])
+
+                    # 보호 지표 생성
+                    if similarity >= 0.6:
+                        protective_indicators.append(
+                            f"'{payload['text']}' - {payload['description']} ({similarity*100:.0f}% 일치)"
+                        )
+                    elif similarity >= 0.4:
+                        protective_indicators.append(
+                            f"친구 대화 패턴 감지: {payload['category']} ({similarity*100:.0f}%)"
+                        )
+                else:
+                    # 위험 패턴
+                    matched_patterns.append(pattern_info)
+
+                    # 위험도 계산
+                    weighted_severity = payload["severity"] * similarity
+                    total_severity += weighted_severity
+                    categories_found.add(payload["category"])
+
+                    # 위험 지표 생성
+                    if similarity >= 0.7:
+                        risk_indicators.append(
+                            f"'{payload['text']}' 패턴과 {similarity*100:.0f}% 유사 - {payload['description']}"
+                        )
+                    elif similarity >= 0.5:
+                        risk_indicators.append(
+                            f"'{payload['text']}' 패턴 감지 ({similarity*100:.0f}% 일치)"
+                        )
+
+            # 최종 위험 점수 계산
+            # 기본 위험 점수
+            base_risk_score = min(100, int(total_severity * 10))
+
+            # 안전 패턴이 감지되면 위험도 감소
+            if safe_score > 0:
+                # 안전 점수가 높을수록 위험도 감소
+                safety_factor = min(0.8, safe_score * 0.1)  # 최대 80% 감소
+                base_risk_score = int(base_risk_score * (1 - safety_factor))
+
+                if safe_categories_found:
+                    protective_indicators.append(
+                        f"친구 대화 맥락 감지: {', '.join(safe_categories_found)}"
                     )
-                elif similarity >= 0.5:
-                    risk_indicators.append(
-                        f"'{payload['text']}' 패턴 감지 ({similarity*100:.0f}% 일치)"
-                    )
 
-            # 최종 위험 점수 계산 (0-100)
-            risk_score = min(100, int(total_severity * 10))
-
-            # 여러 카테고리가 감지되면 추가 위험
-            if len(categories_found) >= 3:
-                risk_score = min(100, risk_score + 15)
+            # 여러 위험 카테고리가 감지되면 추가 위험 (안전 패턴이 없을 때만)
+            if len(categories_found) >= 3 and safe_score == 0:
+                base_risk_score = min(100, base_risk_score + 15)
                 risk_indicators.append(f"다중 스캠 패턴 감지: {', '.join(categories_found)}")
+
+            # 안전 패턴이 위험 패턴보다 유사도가 높으면 위험도 더 낮춤
+            if safe_patterns and matched_patterns:
+                max_safe_sim = max(p["similarity"] for p in safe_patterns)
+                max_risk_sim = max(p["similarity"] for p in matched_patterns)
+                if max_safe_sim > max_risk_sim:
+                    base_risk_score = int(base_risk_score * 0.5)
+                    protective_indicators.append(
+                        f"안전 패턴({max_safe_sim:.0f}%)이 위험 패턴({max_risk_sim:.0f}%)보다 더 유사"
+                    )
 
             return RAGResult(
                 matched_patterns=matched_patterns,
-                risk_score=risk_score,
-                risk_indicators=risk_indicators
+                safe_patterns=safe_patterns,
+                risk_score=max(0, base_risk_score),
+                risk_indicators=risk_indicators,
+                protective_indicators=protective_indicators
             )
 
         except Exception as e:
             logger.error(f"Qdrant search failed: {e}")
             return RAGResult(
                 matched_patterns=[],
+                safe_patterns=[],
                 risk_score=0,
-                risk_indicators=[]
+                risk_indicators=[],
+                protective_indicators=[]
             )
 
     async def add_pattern(self, pattern: ScamPattern) -> bool:
-        """새 스캠 패턴 추가"""
+        """새 패턴 추가 (위험/안전 패턴 모두 가능)"""
         if not self._qdrant or not self._openai:
             return False
 
@@ -376,6 +520,7 @@ class QdrantScamRepository:
                         "severity": pattern.severity,
                         "description": pattern.description,
                         "examples": pattern.examples,
+                        "is_safe": pattern.is_safe,
                     }
                 )]
             )

@@ -52,7 +52,8 @@ class OpenAIService:
         self,
         messages: list[str],
         rag_context: Optional[RAGContext] = None,
-        parsed_messages: Optional[list[ParsedMessage]] = None
+        parsed_messages: Optional[list[ParsedMessage]] = None,
+        relationship_context: Optional[dict] = None
     ) -> ChatAnalysisResult:
         """채팅 메시지 분석"""
         interpretation_steps = []
@@ -96,31 +97,89 @@ class OpenAIService:
             ])
             interpretation_steps.append("기본 패턴 매칭 수행")
 
+            # Step 3.5: 관계/맥락 정보 처리
+            relationship_prompt_context = ""
+            if relationship_context:
+                rel_info = relationship_context.get("relationship")
+                ctx_info = relationship_context.get("context")
+                protective = relationship_context.get("protective_factors", [])
+                risk = relationship_context.get("risk_factors", [])
+
+                parts = []
+                if rel_info:
+                    rel_type = rel_info.get("type", "unknown")
+                    trust = rel_info.get("trust_level", 0)
+                    interaction = rel_info.get("interaction_count", 0)
+                    parts.append(f"- 관계 유형: {rel_type} (신뢰도: {trust:.0%}, 대화 횟수: {interaction}회)")
+                    interpretation_steps.append(f"관계 정보: {rel_type}, 신뢰도 {trust:.0%}")
+
+                if ctx_info:
+                    ctx_type = ctx_info.get("type", "unknown")
+                    ctx_keywords = ctx_info.get("keywords", [])
+                    ctx_conf = ctx_info.get("confidence", 0)
+                    parts.append(f"- 감지된 대화 맥락: {ctx_type} (키워드: {', '.join(ctx_keywords)}, 신뢰도: {ctx_conf:.0%})")
+                    interpretation_steps.append(f"맥락 감지: {ctx_type} ({', '.join(ctx_keywords)})")
+
+                if protective:
+                    parts.append(f"- 보호 요소: {', '.join(protective)}")
+
+                if risk:
+                    parts.append(f"- 위험 요소: {', '.join(risk)}")
+
+                if parts:
+                    relationship_prompt_context = "## 사용자 관계 및 맥락 정보:\n" + "\n".join(parts)
+
             # Step 4: AI 분석
             interpretation_steps.append("GPT-4o AI 분석 요청")
 
-            prompt = f"""당신은 로맨스 스캠 전문 분석가입니다. 아래 대화 내용을 분석해주세요.
+            prompt = f"""당신은 대화 맥락 분석 전문가입니다. 아래 대화 내용을 분석해주세요.
+
+## 1단계: 대화 맥락 판단 (가장 중요 - 먼저 수행)
+다음 중 어떤 상황인지 먼저 판단하세요:
+- **friend_casual**: 친구/지인 간 일상 대화 (게임, 내기, 장난, 송금 요청 등)
+- **online_stranger**: 온라인에서 처음 만난 사람과의 대화
+- **romance**: 로맨스/연애 맥락의 대화
+
+## 친구 대화 신호 (위험도 대폭 낮춤 - 0~20점):
+- 반말, 줄임말 사용: ㅋㅋ, ㅎㅎ, ㄱ?, ㄴㄴ, ㅇㅇ, ㄱㄱ, ㅇㅋ
+- 게임/내기 맥락: 롤, 배그, 오버워치, 한판, 빵, 내기, 졌다, 이겼다
+- 친구 간 금전 표현: "만원빵", "내놔", "한턱", "사줘", "입금해", "계좌 보내"
+- 게임 내기 결과로 보이는 금전 요청
+- 장난스러운 협박: "넌 뒤졌다", "죽었어", "각오해"
+
+## 로맨스 스캠 신호 (위험도 높임 - 60~100점):
+- 낯선 사람의 과도한 애정 표현 (운명, 소울메이트, 첫눈에 반했어)
+- 긴급한 금전 요구 + 감정 조종 (나를 믿지 못하는 거야?)
+- 만남 회피, 영상통화 거부 (보안상, 카메라 고장)
+- 해외 체류 핑계 (군인, 석유 시추, UN)
+- 투자 권유, 원금 보장 약속
 
 ## 분석할 대화:
 {chr(10).join(messages)}
 
-## 로맨스 스캠 패턴:
+## 알려진 스캠 패턴:
 {pattern_descriptions}
 
-{f"## 데이터베이스에서 조회된 스캠 정보:{chr(10)}{rag_prompt_context}" if rag_prompt_context else ""}
+{f"## 데이터베이스에서 조회된 정보:{chr(10)}{rag_prompt_context}" if rag_prompt_context else ""}
+
+{relationship_prompt_context if relationship_prompt_context else ""}
 
 ## 분석 지침:
-1. [상대방] 표시된 메시지가 스캠 가능성이 있는지 중점 분석
-2. [나] 표시된 메시지는 피해자의 반응으로 참고
-3. 데이터베이스에서 매칭된 패턴이 있다면 그 정보를 적극 활용
+1. **맥락을 먼저 파악**: 친구 간 대화인지, 낯선 사람과의 대화인지 판단
+2. **관계 정보 활용**: 위에 제공된 관계/맥락 정보가 있다면 적극 반영
+3. 친구 간 게임 내기로 인한 계좌번호/송금 요청은 정상 (위험도 낮음)
+4. [상대방] 메시지가 스캠 가능성이 있는지 분석
+5. [나] 메시지는 참고용
+6. 데이터베이스 매칭 패턴 활용
 
 ## 응답 형식 (JSON):
 {{
+    "context_type": "friend_casual|online_stranger|romance",
     "risk_score": 0-100 사이의 위험 점수,
     "detected_patterns": ["감지된 패턴 목록"],
     "warning_signs": ["주의해야 할 신호들"],
     "recommendations": ["사용자에게 권장하는 조치"],
-    "analysis": "상세 분석 내용 (2-3문장)"
+    "analysis": "상세 분석 내용 (맥락 판단 근거 포함, 2-3문장)"
 }}
 
 JSON만 응답해주세요."""
@@ -354,20 +413,44 @@ JSON만 응답해주세요."""
         messages: list[str],
         rag_context: Optional[RAGContext] = None
     ) -> ChatAnalysisResult:
-        """폴백: 기본 패턴 매칭 분석"""
+        """폴백: 기본 패턴 매칭 분석 (맥락 기반 개선)"""
         combined_text = " ".join(messages).lower()
         detected = []
         total_severity = 0
 
+        # 1단계: 친구 대화 맥락 감지
+        friend_context_keywords = [
+            "ㅋㅋ", "ㅎㅎ", "ㄱ?", "ㄱㄱ", "ㄴㄴ", "ㅇㅇ", "ㅇㅋ",
+            "롤", "게임", "배그", "오버워치", "발로란트", "한판",
+            "빵", "내기", "졌", "이겼", "만원빵", "내놔", "한턱",
+            "뒤졌", "죽었", "각오해", "사줘"
+        ]
+
+        gaming_betting_keywords = [
+            "롤", "게임", "배그", "한판", "빵", "내기", "졌", "이겼",
+            "만원빵", "만원 빵", "오천빵", "내놔", "한턱"
+        ]
+
+        # 친구 대화 점수 계산
+        friend_score = sum(1 for kw in friend_context_keywords if kw in combined_text)
+        is_gaming_betting = any(kw in combined_text for kw in gaming_betting_keywords)
+
+        # 친구 대화로 판단되면 위험도 대폭 낮춤
+        is_friend_context = friend_score >= 2 or is_gaming_betting
+
+        # 스캠 키워드 패턴
         keyword_patterns = {
-            "love_bombing": ["사랑해", "보고싶", "운명", "첫눈에", "반했", "좋아해"],
-            "financial_request": ["돈", "투자", "송금", "빌려", "계좌", "원", "달러", "비트코인"],
-            "urgency": ["급", "당장", "지금", "빨리", "서둘러", "시간 없"],
-            "isolation": ["비밀", "우리만", "아무에게", "말하지마", "가족한테"],
-            "future_faking": ["결혼", "같이 살", "만나자", "곧 갈게"],
-            "sob_story": ["사고", "아파", "병원", "수술", "도와줘"],
-            "avoidance": ["영상통화", "화상", "만날 수 없", "얼굴"],
+            "love_bombing": ["사랑해", "보고싶", "운명", "첫눈에", "반했", "소울메이트"],
+            "financial_request": ["투자", "비트코인", "코인", "원금 보장", "고수익"],
+            "urgency": ["급해", "당장", "지금 바로", "빨리", "서둘러", "시간 없어"],
+            "isolation": ["비밀", "우리만", "아무에게", "말하지마", "가족한테 말하면"],
+            "future_faking": ["결혼하자", "같이 살자", "곧 만나자", "갈게"],
+            "sob_story": ["사고가 났", "아파서", "병원비", "수술비", "도와줘"],
+            "avoidance": ["영상통화 안", "화상 안", "만날 수 없", "카메라 고장"],
         }
+
+        # 친구 맥락에서는 무시할 키워드 (계좌, 송금 등은 친구 내기일 수 있음)
+        friend_safe_keywords = ["계좌", "송금", "입금", "돈", "원", "빌려"]
 
         severity_map = {
             "love_bombing": 7,
@@ -387,27 +470,56 @@ JSON만 응답해주세요."""
                         total_severity += severity_map.get(pattern_type, 5)
                     break
 
-        # RAG 결과 반영
+        # 친구 맥락이 아닌 경우에만 금전 관련 키워드 체크
+        if not is_friend_context:
+            for keyword in friend_safe_keywords:
+                if keyword in combined_text and "financial_request" not in detected:
+                    detected.append("financial_request")
+                    total_severity += 6  # 맥락 불명시 중간 정도의 위험도
+                    break
+
+        # RAG 결과 반영 (정상 패턴은 제외)
         if rag_context and rag_context.matched_phrases:
             for phrase in rag_context.matched_phrases:
+                # 정상 패턴(is_safe=True)은 스킵
+                if phrase.get("is_safe", False):
+                    continue
                 if phrase["category"] not in detected:
                     detected.append(phrase["category"])
                     total_severity += phrase.get("severity", 5)
 
+        # 위험도 계산
         risk_score = min(100, total_severity * 8)
 
-        warning_signs = []
-        if "love_bombing" in detected:
-            warning_signs.append("과도한 애정 표현이 감지되었습니다")
-        if "financial_request" in detected:
-            warning_signs.append("금전 관련 요청이 감지되었습니다 - 주의하세요!")
-        if "urgency" in detected:
-            warning_signs.append("급박함을 강조하고 있습니다")
-        if "isolation" in detected:
-            warning_signs.append("고립을 유도하는 패턴이 감지되었습니다")
+        # 친구 맥락이면 위험도 대폭 하향
+        context_type = "friend_casual" if is_friend_context else "unknown"
+        if is_friend_context:
+            risk_score = max(0, int(risk_score * 0.2))  # 80% 감소
+            # gaming/betting 맥락에서 financial_request는 제거
+            if is_gaming_betting and "financial_request" in detected:
+                detected.remove("financial_request")
 
-        if rag_context and rag_context.risk_indicators:
+        warning_signs = []
+        if not is_friend_context:
+            if "love_bombing" in detected:
+                warning_signs.append("과도한 애정 표현이 감지되었습니다")
+            if "financial_request" in detected:
+                warning_signs.append("금전 관련 요청이 감지되었습니다 - 주의하세요!")
+            if "urgency" in detected:
+                warning_signs.append("급박함을 강조하고 있습니다")
+            if "isolation" in detected:
+                warning_signs.append("고립을 유도하는 패턴이 감지되었습니다")
+        else:
+            warning_signs.append("친구/지인 간의 일상 대화로 판단됩니다")
+
+        if rag_context and rag_context.risk_indicators and not is_friend_context:
             warning_signs.extend(rag_context.risk_indicators[:3])
+
+        # 분석 결과 텍스트
+        if is_friend_context:
+            analysis_text = f"친구 대화 맥락 감지 (게임/내기: {is_gaming_betting}). 위험도: {risk_score}점. 일상적인 대화로 판단됩니다."
+        else:
+            analysis_text = f"패턴 기반 분석 완료. 위험도: {risk_score}점. 감지된 패턴: {', '.join(detected) if detected else '없음'}"
 
         return ChatAnalysisResult.create(
             risk_score=risk_score,
@@ -419,7 +531,7 @@ JSON만 응답해주세요."""
                 "가족이나 친구와 상담하세요",
                 "영상통화를 요청하세요"
             ] if risk_score > 30 else ["현재 특별한 위험 신호는 감지되지 않았습니다"],
-            ai_analysis=f"패턴 기반 분석 완료. 위험도: {risk_score}점. 감지된 패턴: {', '.join(detected) if detected else '없음'}",
+            ai_analysis=analysis_text,
             rag_context=rag_context
         )
 

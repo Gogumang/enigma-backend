@@ -43,18 +43,31 @@ class RAGContext:
     total_reports: int = 0
 
     def to_prompt_context(self) -> str:
-        """프롬프트에 포함할 컨텍스트 생성"""
+        """프롬프트에 포함할 컨텍스트 생성 (위험/안전 패턴 구분)"""
         if not self.matched_phrases and not self.similar_cases:
             return ""
 
         context_parts = []
 
-        if self.matched_phrases:
-            phrases_text = "\n".join([
-                f"- '{p['text']}' (카테고리: {p['category']}, 위험도: {p['severity']}/10, {p['usage_count']}건 사용)"
-                for p in self.matched_phrases[:5]
+        # 위험 패턴과 안전 패턴 분리
+        risk_phrases = [p for p in self.matched_phrases if not p.get('is_safe', False)]
+        safe_phrases = [p for p in self.matched_phrases if p.get('is_safe', False)]
+
+        # 안전 패턴 (친구 대화) 먼저 표시 - AI가 맥락을 먼저 파악하도록
+        if safe_phrases:
+            safe_text = "\n".join([
+                f"- '{p['text']}' (유형: {p['category']}, 유사도: {p.get('similarity', 0):.0f}%) - {p.get('description', '')}"
+                for p in safe_phrases[:5]
             ])
-            context_parts.append(f"## 매칭된 스캠 패턴:\n{phrases_text}")
+            context_parts.append(f"## ✓ 매칭된 정상/친구 대화 패턴 (위험도 낮음):\n{safe_text}")
+
+        # 위험 패턴
+        if risk_phrases:
+            risk_text = "\n".join([
+                f"- '{p['text']}' (카테고리: {p['category']}, 위험도: {p['severity']}/10, 유사도: {p.get('similarity', 0):.0f}%)"
+                for p in risk_phrases[:5]
+            ])
+            context_parts.append(f"## ⚠ 매칭된 스캠 패턴:\n{risk_text}")
 
         if self.similar_cases:
             cases_text = "\n".join([
