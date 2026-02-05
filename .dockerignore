@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Misc
+*.log
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+*.bak
+.DS_Store
+Thumbs.db
+
+# Infrastructure (not needed in Docker image)
+infra/
+scripts/
+.github/
+
+# Development
+tests/
+*.test.py
+conftest.py
+.pre-commit-config.yaml
+.ruff_cache/
+
+# Models (downloaded at runtime or mounted)
+models/
+*.h5
+*.keras
+*.pkl
+*.pth
