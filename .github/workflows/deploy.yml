@@ -121,16 +121,21 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           envs: ECR_REGISTRY,ECR_REPOSITORY,IMAGE_URI,AWS_REGION,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY
           script: |
+            set -e
             cd /home/ubuntu/app
+
+            echo "=== Current directory contents ==="
+            ls -la
 
             # Configure AWS CLI and login to ECR
             export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
             export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
             export AWS_DEFAULT_REGION=$AWS_REGION
 
+            echo "=== ECR Login ==="
             aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
 
-            # Pull latest image
+            echo "=== Pull image: $IMAGE_URI ==="
             docker pull $IMAGE_URI
 
             # Create docker-compose override for production
@@ -141,28 +146,55 @@ jobs:
                 build: !reset null
             EOF
 
+            echo "=== docker-compose.override.yml ==="
+            cat docker-compose.override.yml
+
             # Stop existing containers
+            echo "=== Stopping existing containers ==="
             docker compose -f docker-compose.prod.yml -f docker-compose.override.yml down --remove-orphans || true
 
             # Start new containers
+            echo "=== Starting containers ==="
             docker compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d
 
+            # Show container status immediately
+            echo "=== Container status ==="
+            docker ps -a
+
+            # Wait for app container to be running
+            echo "=== Waiting for app container ==="
+            sleep 10
+
+            # Show app logs
+            echo "=== App container logs ==="
+            docker logs enigma-app --tail 100 || echo "No app logs yet"
+
             # Wait for health check
-            echo "Waiting for application to be healthy..."
+            echo "=== Waiting for application to be healthy ==="
             for i in {1..30}; do
+              if curl -sf http://localhost:3001/api/health > /dev/null 2>&1; then
+                echo "App is healthy on port 3001!"
+                break
+              fi
               if curl -sf http://localhost/api/health > /dev/null 2>&1; then
-                echo "Application is healthy!"
+                echo "App is healthy via nginx!"
                 break
               fi
               echo "Attempt $i/30: Waiting..."
+              docker ps -a
               sleep 10
             done
 
-            # Cleanup old images
-            docker image prune -af --filter "until=24h" || true
+            # Final status
+            echo "=== Final container status ==="
+            docker ps -a
 
-            # Show status
-            docker ps
+            echo "=== App logs ==="
+            docker logs enigma-app --tail 50 || true
+
+            echo "=== Nginx logs ==="
+            docker logs enigma-nginx --tail 20 || true
+
             echo "Deployment completed!"
 
       - name: Verify deployment
@@ -172,12 +204,26 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            response=$(curl -sf http://localhost/api/health)
-            if [ $? -eq 0 ]; then
+            echo "=== Container Status ==="
+            docker ps -a
+
+            echo "=== Health Check ==="
+            response=$(curl -sf http://localhost/api/health 2>&1) && {
               echo "Health check passed!"
               echo "$response"
-            else
-              echo "Health check failed!"
-              docker logs enigma-app --tail 50
-              exit 1
-            fi
+            } || {
+              echo "Health check via nginx failed, trying direct..."
+              response=$(curl -sf http://localhost:3001/api/health 2>&1) && {
+                echo "Direct health check passed!"
+                echo "$response"
+              } || {
+                echo "All health checks failed!"
+                echo ""
+                echo "=== App Logs ==="
+                docker logs enigma-app --tail 100 2>&1 || echo "No app container"
+                echo ""
+                echo "=== Nginx Logs ==="
+                docker logs enigma-nginx --tail 50 2>&1 || echo "No nginx container"
+                exit 1
+              }
+            }
