@@ -26,16 +26,13 @@ dependencies = [
     "efficientnet-pytorch>=0.7.1",
     "opencv-python>=4.8.0",
 
-    # PyTorch & CLIP
-    "torch>=2.0.0",
-    "torchvision>=0.15.0",
+    # CLIP dependencies (torch installed separately in Dockerfile for CPU)
     "ftfy>=6.1.0",
     "regex>=2023.0.0",
 
     # AI/ML
     "deepface>=0.0.93",
-    "tensorflow>=2.18.0",
-    "tf-keras>=2.18.0",
+    "tensorflow-cpu>=2.15.0",
     "openai>=1.59.0",
     "langgraph>=0.2.0",
     "langchain-openai>=0.2.0",

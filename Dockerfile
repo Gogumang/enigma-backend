@@ -9,26 +9,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-# Set environment variables
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never
-
 WORKDIR /app
 
 # Copy project files
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-# Install dependencies using uv
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv venv /app/.venv && \
+# Create venv and install dependencies (CPU-only PyTorch for smaller image)
+RUN python -m venv /app/.venv && \
     . /app/.venv/bin/activate && \
-    uv pip install . && \
-    uv pip install git+https://github.com/openai/CLIP.git
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir . && \
+    pip install --no-cache-dir git+https://github.com/openai/CLIP.git && \
+    find /app/.venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
+    find /app/.venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
+    find /app/.venv -type d -name "test" -exec rm -rf {} + 2>/dev/null || true
 
 # ============================================
 # Stage 2: Runtime
