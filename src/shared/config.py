@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     # Server
-    port: int = 3001
+    port: int = 4000
     cors_origin: str = "http://localhost:3000"
 
     # Sightengine

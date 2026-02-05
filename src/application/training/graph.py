@@ -220,15 +220,15 @@ def determine_next_stage(state: TrainingState) -> TrainingState:
         elif current == ScamStage.GUILT:
             next_stage = ScamStage.GIVE_UP
     else:
-        # 중립/긍정이면 자연스럽게 진행
+        # 중립/긍정이면 자연스럽게 진행 (5턴 내외로 축소)
         stage_progression = {
             ScamStage.GREETING: ScamStage.RAPPORT,
-            ScamStage.RAPPORT: ScamStage.LOVE_BOMBING if turn >= 2 else ScamStage.RAPPORT,
-            ScamStage.LOVE_BOMBING: ScamStage.TRUST if turn >= 4 else ScamStage.LOVE_BOMBING,
-            ScamStage.TRUST: ScamStage.STORY if turn >= 6 else ScamStage.TRUST,
-            ScamStage.STORY: ScamStage.SOFT_ASK if turn >= 8 else ScamStage.STORY,
-            ScamStage.SOFT_ASK: ScamStage.HARD_ASK if turn >= 10 else ScamStage.SOFT_ASK,
-            ScamStage.HARD_ASK: ScamStage.PRESSURE if turn >= 12 else ScamStage.HARD_ASK,
+            ScamStage.RAPPORT: ScamStage.LOVE_BOMBING if turn >= 1 else ScamStage.RAPPORT,
+            ScamStage.LOVE_BOMBING: ScamStage.STORY if turn >= 2 else ScamStage.LOVE_BOMBING,
+            ScamStage.TRUST: ScamStage.STORY,
+            ScamStage.STORY: ScamStage.SOFT_ASK if turn >= 3 else ScamStage.STORY,
+            ScamStage.SOFT_ASK: ScamStage.HARD_ASK if turn >= 4 else ScamStage.SOFT_ASK,
+            ScamStage.HARD_ASK: ScamStage.PRESSURE if turn >= 5 else ScamStage.HARD_ASK,
             ScamStage.PRESSURE: ScamStage.GUILT,
             ScamStage.GUILT: ScamStage.GIVE_UP,
         }
@@ -719,7 +719,7 @@ class ScamSimulationGraph:
         elif state["completion_reason"] == "user_scammed":
             grade = "F"
             score = max(0, score - 30)
-        elif score >= 90 and turns >= 8:
+        elif score >= 90 and turns >= 5:
             grade = "S"
         elif score >= 80:
             grade = "A"

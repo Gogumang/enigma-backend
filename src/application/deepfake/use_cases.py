@@ -11,6 +11,25 @@ from src.infrastructure.ai.deepfake_explainer import get_deepfake_explainer_serv
 from src.infrastructure.external import SightengineService, OpenAIService
 from src.shared.exceptions import ValidationException
 
+# CLIP 및 Cross-EfficientViT 디텍터
+def get_clip_detector_safe():
+    """CLIP 디텍터 안전하게 가져오기"""
+    try:
+        from src.infrastructure.ai.clip_detector import get_clip_detector
+        return get_clip_detector()
+    except Exception as e:
+        logger.warning(f"CLIP detector not available: {e}")
+        return None
+
+def get_cross_evit_detector_safe():
+    """Cross-EfficientViT 디텍터 안전하게 가져오기"""
+    try:
+        from src.infrastructure.ai.cross_efficient_vit import get_cross_evit_detector
+        return get_cross_evit_detector()
+    except Exception as e:
+        logger.warning(f"Cross-EfficientViT detector not available: {e}")
+        return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,7 +106,32 @@ class AnalyzeImageUseCase:
         # 1. 이미지 품질 체크 (blur detection)
         quality_result = _image_quality_service.analyze(image_data)
 
-        # 2. EfficientViT 기반 딥페이크 탐지 시도 (히트맵 + 정확한 좌표)
+        # 2. Sightengine API 호출 (genai + deepfake 모델)
+        sightengine_result = None
+        sightengine_confidence = 0
+        sightengine_genai_score = 0
+        if self.sightengine.is_configured():
+            try:
+                logger.info("Using Sightengine API for AI/deepfake detection")
+                sightengine_result = await self.sightengine.analyze_image(image_data)
+                sightengine_confidence = sightengine_result.confidence
+                sightengine_genai_score = sightengine_result.details.get("genai_score", 0)
+            except Exception as e:
+                logger.warning(f"Sightengine API failed: {e}")
+
+        # 3. CLIP 기반 AI 생성 이미지 탐지
+        clip_confidence = 0
+        clip_detector = get_clip_detector_safe()
+        if clip_detector and clip_detector.is_available():
+            try:
+                logger.info("Using CLIP for AI-generated image detection")
+                clip_result = clip_detector.analyze(image_data)
+                clip_confidence = clip_result.fake_score
+                logger.info(f"CLIP result: fake_score={clip_confidence:.1f}%")
+            except Exception as e:
+                logger.warning(f"CLIP detector failed: {e}")
+
+        # 4. EfficientViT 기반 딥페이크 탐지 시도 (히트맵 + 정확한 좌표)
         explainer_result = None
         try:
             explainer = get_deepfake_explainer_service()
@@ -97,11 +141,16 @@ class AnalyzeImageUseCase:
         except Exception as e:
             logger.warning(f"DeepfakeExplainer failed, falling back: {e}")
 
-        # 3. EfficientViT 결과가 있으면 사용
+        # 5. 앙상블: Sightengine + EfficientViT + CLIP 결과 통합
         if explainer_result:
-            # EfficientViT에서 얻은 결과로 기본 정보 설정
-            is_deepfake = explainer_result.is_deepfake
-            confidence = explainer_result.confidence
+            # EfficientViT 결과
+            evit_confidence = explainer_result.confidence
+
+            # 모든 모델 결과와 앙상블 (가장 높은 값 사용)
+            confidence = max(evit_confidence, sightengine_confidence, sightengine_genai_score, clip_confidence)
+            is_deepfake = confidence >= 50
+
+            logger.info(f"Ensemble: EViT={evit_confidence:.1f}%, Sightengine={sightengine_confidence:.1f}%, GenAI={sightengine_genai_score:.1f}%, CLIP={clip_confidence:.1f}% -> Final={confidence:.1f}%")
 
             # 마커 변환 (DetectionMarker -> dict)
             markers = [
@@ -128,6 +177,15 @@ class AnalyzeImageUseCase:
                 for c in getattr(explainer_result, 'algorithm_checks', [])
             ]
 
+            # Sightengine genai 결과 추가
+            if sightengine_genai_score > 0:
+                algorithm_checks.append({
+                    "name": "ai_generated",
+                    "passed": sightengine_genai_score < 50,
+                    "score": sightengine_genai_score,
+                    "description": f"AI 생성 이미지 감지 (DALL-E, Midjourney, Stable Diffusion 등): {sightengine_genai_score:.1f}%",
+                })
+
             ensemble_details = getattr(explainer_result, 'ensemble_details', {})
 
             # 기술적 지표 생성 (알고리즘 검사 기반)
@@ -141,6 +199,7 @@ class AnalyzeImageUseCase:
                         "edge_artifacts": "경계 아티팩트",
                         "noise_pattern": "노이즈 패턴 이상",
                         "compression_artifacts": "압축 아티팩트 이상",
+                        "ai_generated": "AI 생성 이미지",
                     }
                     technical_indicators.append({
                         "name": indicator_names.get(check["name"], check["name"]),
@@ -166,16 +225,27 @@ class AnalyzeImageUseCase:
             else:
                 risk_level = "low"
 
+            # AI 생성 이미지인 경우 메시지 다르게
+            ai_gen_score = max(sightengine_genai_score, clip_confidence)
+            if ai_gen_score >= 50 and ai_gen_score >= evit_confidence:
+                message = f"AI 생성 이미지 의심 ({confidence:.1f}%)"
+            else:
+                message = f"딥페이크 {'의심' if is_deepfake else '가능성 낮음'} ({confidence:.1f}%)"
+
             result = DeepfakeAnalysisResult(
                 is_deepfake=is_deepfake,
                 confidence=confidence,
                 risk_level=risk_level,
                 media_type="image",
-                message=f"딥페이크 {'의심' if is_deepfake else '가능성 낮음'} ({confidence:.1f}%)",
+                message=message,
                 details={
                     "heatmap_base64": explainer_result.heatmap_base64,
-                    "model_confidence": ensemble_details.get("model_confidence", confidence),
+                    "model_confidence": ensemble_details.get("model_confidence", evit_confidence),
                     "algorithm_score": ensemble_details.get("algorithm_score", 0),
+                    "sightengine_deepfake": sightengine_confidence,
+                    "sightengine_genai": sightengine_genai_score,
+                    "efficientvit": evit_confidence,
+                    "clip": clip_confidence,
                 },
                 markers=markers,
                 overall_assessment=overall_assessment,
@@ -433,21 +503,78 @@ class AnalyzeImageUseCase:
 
 
 class AnalyzeVideoUseCase:
-    """비디오 딥페이크 분석 유스케이스"""
+    """비디오 딥페이크 분석 유스케이스 (Cross-EfficientViT + Sightengine 앙상블)"""
 
     def __init__(self, sightengine: SightengineService):
         self.sightengine = sightengine
 
     async def execute(self, video_data: bytes) -> DeepfakeAnalysisResult:
-        """비디오 분석 실행"""
+        """비디오 분석 실행 (Cross-EfficientViT + Sightengine 앙상블)"""
         if not video_data:
             raise ValidationException("비디오 데이터가 필요합니다")
 
-        if not self.sightengine.is_configured():
+        # 1. Cross-EfficientViT 분석 (DFDC AUC 0.951)
+        cross_evit_confidence = 0
+        cross_evit_result = None
+        cross_evit_detector = get_cross_evit_detector_safe()
+        if cross_evit_detector and cross_evit_detector.is_available():
+            try:
+                logger.info("Using Cross-EfficientViT for video deepfake detection")
+                cross_evit_result = cross_evit_detector.analyze_video(video_data)
+                cross_evit_confidence = cross_evit_result.confidence
+                logger.info(f"Cross-EfficientViT result: {cross_evit_confidence:.1f}%")
+            except Exception as e:
+                logger.warning(f"Cross-EfficientViT failed: {e}")
+
+        # 2. Sightengine API 분석
+        sightengine_confidence = 0
+        sightengine_result = None
+        if self.sightengine.is_configured():
+            try:
+                logger.info("Using Sightengine API for video analysis")
+                sightengine_result = await self.sightengine.analyze_video(video_data)
+                sightengine_confidence = sightengine_result.confidence
+            except Exception as e:
+                logger.warning(f"Sightengine video analysis failed: {e}")
+
+        # 3. 앙상블: 두 결과 중 높은 값 사용
+        confidence = max(cross_evit_confidence, sightengine_confidence)
+
+        # 둘 다 실패하면 시뮬레이션 결과
+        if confidence == 0 and not cross_evit_result and not sightengine_result:
             return self._simulate_result()
 
-        analysis = await self.sightengine.analyze_video(video_data)
-        return self._to_result(analysis)
+        is_deepfake = confidence >= 50
+
+        # 위험 수준 결정
+        if confidence >= 70:
+            risk_level = "high"
+        elif confidence >= 50:
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+
+        if is_deepfake:
+            message = f"딥페이크 비디오 의심! ({confidence:.1f}% 확률)"
+        else:
+            message = f"딥페이크 가능성 낮음 ({100 - confidence:.1f}% 신뢰도)"
+
+        logger.info(f"Video Ensemble: CrossEViT={cross_evit_confidence:.1f}%, Sightengine={sightengine_confidence:.1f}% -> Final={confidence:.1f}%")
+
+        return DeepfakeAnalysisResult(
+            is_deepfake=is_deepfake,
+            confidence=confidence,
+            risk_level=risk_level,
+            media_type="video",
+            message=message,
+            details={
+                "cross_efficientvit": cross_evit_confidence,
+                "sightengine": sightengine_confidence,
+                "analyzed_frames": cross_evit_result.analyzed_frames if cross_evit_result else 0,
+                "frame_scores": cross_evit_result.frame_scores if cross_evit_result else [],
+                "model": "Cross-EfficientViT + Sightengine Ensemble",
+            }
+        )
 
     def _to_result(self, analysis: DeepfakeAnalysis) -> DeepfakeAnalysisResult:
         if analysis.is_deepfake:

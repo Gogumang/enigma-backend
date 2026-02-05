@@ -72,10 +72,11 @@ class EnhancedImageSearchService:
 
             logger.info(f"Image uploaded: {uploaded_image_url}")
 
-            # 2. 병렬로 여러 검색 실행
+            # 2. 병렬로 여러 검색 실행 (업로드된 URL 사용)
             search_tasks = [
-                self._search_serpapi(image_data),
+                self._search_serpapi_lens(uploaded_image_url),
                 self._search_serpapi_google_images(uploaded_image_url),
+                self._search_yandex(uploaded_image_url),
             ]
 
             search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
@@ -99,14 +100,26 @@ class EnhancedImageSearchService:
             # 6. 점수순 정렬
             results.sort(key=lambda x: x.match_score, reverse=True)
 
-            # 7. 수동 검색 링크 생성
+            # 7. 얼굴 매칭 결과만 필터링 (match_score > 0) 또는 소셜미디어 결과
+            social_platforms = {'instagram', 'facebook', 'linkedin', 'twitter', 'tiktok', 'vk'}
+            filtered_results = [
+                r for r in results
+                if r.match_score > 30  # 얼굴 유사도 30% 이상
+                or r.platform in social_platforms  # 소셜미디어 결과는 유지
+            ]
+
+            # 필터링 후 결과가 없으면 원본 중 소셜미디어만
+            if not filtered_results:
+                filtered_results = [r for r in results if r.platform in social_platforms]
+
+            # 8. 수동 검색 링크 생성
             search_links = self._generate_all_search_links(uploaded_image_url)
 
-            logger.info(f"Enhanced search complete: {len(results)} results")
+            logger.info(f"Enhanced search complete: {len(filtered_results)} results (filtered from {len(results)})")
 
             return EnhancedSearchResponse(
                 success=True,
-                results=results[:30],  # 최대 30개
+                results=filtered_results[:30],  # 최대 30개
                 search_links=search_links,
                 uploaded_image_url=uploaded_image_url
             )
@@ -192,23 +205,21 @@ class EnhancedImageSearchService:
             logger.debug(f"litterbox upload failed: {e}")
         return None
 
-    async def _search_serpapi(self, image_data: bytes) -> list[EnhancedSearchResult]:
-        """SerpApi Google Lens 검색"""
+    async def _search_serpapi_lens(self, image_url: str) -> list[EnhancedSearchResult]:
+        """SerpApi Google Lens 검색 (URL 사용)"""
         results = []
 
-        if not self.settings.serpapi_key:
-            logger.debug("SerpApi key not configured")
+        if not self.settings.serpapi_key or not image_url:
+            logger.debug("SerpApi key not configured or no image URL")
             return results
 
         try:
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
-
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.get(
                     "https://serpapi.com/search",
                     params={
                         "engine": "google_lens",
-                        "url": f"data:image/jpeg;base64,{image_base64}",
+                        "url": image_url,
                         "api_key": self.settings.serpapi_key
                     }
                 )
@@ -257,6 +268,46 @@ class EnhancedImageSearchService:
 
         except Exception as e:
             logger.warning(f"SerpApi search failed: {e}")
+
+        return results
+
+    async def _search_yandex(self, image_url: str) -> list[EnhancedSearchResult]:
+        """SerpApi Yandex 이미지 검색 (얼굴 인식 강력)"""
+        results = []
+
+        if not self.settings.serpapi_key or not image_url:
+            return results
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.get(
+                    "https://serpapi.com/search",
+                    params={
+                        "engine": "yandex_images",
+                        "url": image_url,
+                        "api_key": self.settings.serpapi_key
+                    }
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+
+                    # Yandex 이미지 결과
+                    for img in data.get("image_results", [])[:15]:
+                        results.append(EnhancedSearchResult(
+                            title=img.get("title", "Yandex 결과"),
+                            source_url=img.get("source", img.get("link", "")),
+                            image_url=img.get("original", img.get("thumbnail", "")),
+                            thumbnail_url=img.get("thumbnail"),
+                            platform="other",
+                            match_score=0,
+                            source_engine="yandex"
+                        ))
+
+                    logger.info(f"Yandex found {len(results)} results")
+
+        except Exception as e:
+            logger.warning(f"Yandex search failed: {e}")
 
         return results
 
@@ -437,8 +488,10 @@ class EnhancedImageSearchService:
         unique = []
 
         for result in results:
-            # URL에서 도메인+경로로 키 생성
-            key = result.source_url.split('?')[0] if result.source_url else result.image_url
+            # URL에서 도메인+경로로 키 생성 (image_url이 dict일 수 있으므로 타입 체크)
+            source = result.source_url if isinstance(result.source_url, str) else None
+            image = result.image_url if isinstance(result.image_url, str) else None
+            key = source.split('?')[0] if source else image
             if key and key not in seen_urls:
                 seen_urls.add(key)
                 unique.append(result)
@@ -461,7 +514,10 @@ class EnhancedImageSearchService:
         }
 
         for result in results:
-            url_lower = (result.source_url + result.image_url).lower()
+            # image_url이 dict일 수 있으므로 타입 체크
+            source_url = result.source_url if isinstance(result.source_url, str) else ""
+            image_url = result.image_url if isinstance(result.image_url, str) else ""
+            url_lower = (source_url + image_url).lower()
             for platform, patterns in platform_patterns.items():
                 if any(pattern in url_lower for pattern in patterns):
                     result.platform = platform
@@ -488,7 +544,10 @@ class EnhancedImageSearchService:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 for result in results:
                     try:
-                        img_url = result.thumbnail_url or result.image_url
+                        # image_url이 dict일 수 있으므로 타입 체크
+                        thumbnail = result.thumbnail_url if isinstance(result.thumbnail_url, str) else None
+                        image = result.image_url if isinstance(result.image_url, str) else None
+                        img_url = thumbnail or image
                         if not img_url or not img_url.startswith('http'):
                             continue
 

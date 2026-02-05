@@ -3,6 +3,12 @@
 # ============================================
 FROM python:3.11-slim AS builder
 
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
@@ -13,11 +19,16 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
-# Install dependencies
+# Copy project files
 COPY pyproject.toml ./
+COPY src ./src
+
+# Install dependencies using uv
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-deps -r pyproject.toml && \
-    uv pip install --system -r pyproject.toml
+    uv venv /app/.venv && \
+    . /app/.venv/bin/activate && \
+    uv pip install . && \
+    uv pip install git+https://github.com/openai/CLIP.git
 
 # ============================================
 # Stage 2: Runtime
@@ -40,9 +51,8 @@ RUN useradd --create-home --shell /bin/bash appuser
 
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy virtual environment from builder
+COPY --from=builder /app/.venv /app/.venv
 
 # Copy application code
 COPY --chown=appuser:appuser src ./src
@@ -51,7 +61,9 @@ COPY --chown=appuser:appuser assets ./assets
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    PATH="/app/.venv/bin:$PATH" \
+    VIRTUAL_ENV=/app/.venv
 
 # Switch to non-root user
 USER appuser

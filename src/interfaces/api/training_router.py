@@ -95,6 +95,7 @@ async def start_training(
                 "openingMessage": opening_message,
                 "currentStage": session_info["current_stage"],
                 "feedPosts": feed_posts,
+                "maxTurns": 5,
                 "hint": "이것은 스캠 시뮬레이션입니다. 상대방은 AI 스캐머 역할을 합니다. 실제처럼 대응해보세요!",
             }
         )

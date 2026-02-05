@@ -17,6 +17,7 @@ from src.interfaces.api import (
     profile_router,
     training_router,
     url_router,
+    verify_router,
 )
 from src.shared.config import get_settings
 from src.shared.exceptions import DomainException
@@ -110,6 +111,7 @@ app.include_router(fraud_router, prefix="/api")
 app.include_router(network_router, prefix="/api")
 app.include_router(training_router, prefix="/api")
 app.include_router(url_router, prefix="/api")
+app.include_router(verify_router, prefix="/api")
 
 
 # 헬스체크

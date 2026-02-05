@@ -32,7 +32,7 @@ class SightengineService:
                 response = await client.post(
                     f"{self.BASE_URL}/check.json",
                     data={
-                        "models": "deepfake",
+                        "models": "deepfake,genai",
                         "api_user": self.api_user,
                         "api_secret": self.api_secret,
                     },
@@ -62,7 +62,7 @@ class SightengineService:
                 response = await client.get(
                     f"{self.BASE_URL}/check.json",
                     params={
-                        "models": "deepfake",
+                        "models": "deepfake,genai",
                         "api_user": self.api_user,
                         "api_secret": self.api_secret,
                         "url": url
@@ -113,15 +113,29 @@ class SightengineService:
             raise ExternalServiceException(str(e), "Sightengine") from e
 
     def _parse_image_result(self, result: dict) -> DeepfakeAnalysis:
-        """이미지 분석 결과 파싱"""
-        deepfake_data = result.get("type", {}).get("deepfake", 0)
-        confidence = float(deepfake_data) * 100 if deepfake_data else 0
+        """이미지 분석 결과 파싱 (deepfake + genai)"""
+        # deepfake 점수 (얼굴 조작)
+        deepfake_score = float(result.get("type", {}).get("deepfake", 0)) * 100
+
+        # genai 점수 (AI 생성 이미지 - DALL-E, Midjourney, Stable Diffusion 등)
+        genai_score = float(result.get("type", {}).get("ai_generated", 0)) * 100
+
+        # 둘 중 높은 점수 사용
+        confidence = max(deepfake_score, genai_score)
+
+        # 상세 정보에 각 점수 포함
+        details = {
+            **result,
+            "deepfake_score": deepfake_score,
+            "genai_score": genai_score,
+            "detection_type": "genai" if genai_score > deepfake_score else "deepfake",
+        }
 
         return DeepfakeAnalysis.create(
             is_deepfake=confidence >= 50,
             confidence=confidence,
             media_type=MediaType.IMAGE,
-            details=result
+            details=details
         )
 
     def _parse_video_result(self, result: dict) -> DeepfakeAnalysis:

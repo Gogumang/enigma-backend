@@ -214,19 +214,16 @@ class ScamTrainingUseCase:
         return history
 
     def _determine_phase(self, turn_count: int, difficulty: int) -> ScamPhase:
-        """턴 수에 따른 스캠 단계 결정"""
-        # 난이도가 높을수록 천천히 진행
-        phase_threshold = difficulty * 2
-
-        if turn_count < phase_threshold:
+        """턴 수에 따른 스캠 단계 결정 (5턴 내외로 축소)"""
+        if turn_count < 1:
             return ScamPhase.INTRODUCTION
-        elif turn_count < phase_threshold * 2:
+        elif turn_count < 2:
             return ScamPhase.LOVE_BOMBING
-        elif turn_count < phase_threshold * 3:
+        elif turn_count < 3:
             return ScamPhase.TRUST_BUILDING
-        elif turn_count < phase_threshold * 4:
+        elif turn_count < 4:
             return ScamPhase.STORY_SETUP
-        elif turn_count < phase_threshold * 5:
+        elif turn_count < 5:
             return ScamPhase.THE_ASK
         else:
             return ScamPhase.PRESSURE
@@ -446,7 +443,7 @@ class ScamTrainingUseCase:
 
     def _calculate_grade(self, score: int, turns: int) -> str:
         """등급 계산"""
-        if score >= 95 and turns >= 10:
+        if score >= 95 and turns >= 5:
             return "S"
         elif score >= 85:
             return "A"
