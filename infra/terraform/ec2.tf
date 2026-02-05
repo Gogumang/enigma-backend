@@ -25,6 +25,9 @@ resource "aws_instance" "enigma" {
     apt-get update
     apt-get upgrade -y
 
+    # Install AWS CLI
+    apt-get install -y awscli
+
     # Install Docker
     apt-get install -y apt-transport-https ca-certificates curl software-properties-common
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg

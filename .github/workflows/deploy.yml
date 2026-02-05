@@ -127,6 +127,13 @@ jobs:
             echo "=== Current directory contents ==="
             ls -la
 
+            # Install AWS CLI if not present
+            if ! command -v aws &> /dev/null; then
+              echo "=== Installing AWS CLI ==="
+              sudo apt-get update
+              sudo apt-get install -y awscli
+            fi
+
             # Configure AWS CLI and login to ECR
             export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
             export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
