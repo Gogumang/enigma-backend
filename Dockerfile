@@ -54,6 +54,9 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --chown=appuser:appuser src ./src
 COPY --chown=appuser:appuser assets ./assets
 
+# Create data directory for scammer repository
+RUN mkdir -p /app/data && chown appuser:appuser /app/data
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
