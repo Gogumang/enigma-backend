@@ -63,11 +63,11 @@ ENV PYTHONUNBUFFERED=1 \
 USER appuser
 
 # Expose port
-EXPOSE 3001
+EXPOSE 4000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:3001/api/health || exit 1
+    CMD curl -f http://localhost:4000/api/health || exit 1
 
 # Run the application
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "3001"]
+CMD ["/app/.venv/bin/uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "4000"]
