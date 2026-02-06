@@ -38,8 +38,8 @@ resource "aws_instance" "enigma" {
     # Add ubuntu user to docker group
     usermod -aG docker ubuntu
 
-    # Setup swap (2GB)
-    fallocate -l 2G /swapfile
+    # Setup swap (4GB)
+    fallocate -l 4G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile
     swapon /swapfile

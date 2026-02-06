@@ -84,7 +84,7 @@ jobs:
       - name: Create .env file
         run: |
           cat > .env << EOF
-          PORT=3001
+          PORT=4000
           CORS_ORIGIN=${{ secrets.CORS_ORIGIN }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           SIGHTENGINE_API_USER=${{ secrets.SIGHTENGINE_API_USER }}
@@ -179,8 +179,8 @@ jobs:
             # Wait for health check
             echo "=== Waiting for application to be healthy ==="
             for i in {1..30}; do
-              if curl -sf http://localhost:3001/api/health > /dev/null 2>&1; then
-                echo "App is healthy on port 3001!"
+              if curl -sf http://localhost:4000/api/health > /dev/null 2>&1; then
+                echo "App is healthy on port 4000!"
                 break
               fi
               if curl -sf http://localhost/api/health > /dev/null 2>&1; then
@@ -220,7 +220,7 @@ jobs:
               echo "$response"
             } || {
               echo "Health check via nginx failed, trying direct..."
-              response=$(curl -sf http://localhost:3001/api/health 2>&1) && {
+              response=$(curl -sf http://localhost:4000/api/health 2>&1) && {
                 echo "Direct health check passed!"
                 echo "$response"
               } || {
