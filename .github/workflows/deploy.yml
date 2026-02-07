@@ -142,6 +142,13 @@ jobs:
             echo "=== ECR Login ==="
             aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
 
+            # 이전 이미지/캐시 정리 (디스크 확보)
+            echo "=== Cleaning up old Docker resources ==="
+            docker compose -f docker-compose.prod.yml -f docker-compose.override.yml down --remove-orphans 2>/dev/null || true
+            docker system prune -af --volumes 2>/dev/null || true
+            echo "=== Disk usage after cleanup ==="
+            df -h /
+
             echo "=== Pull image: $IMAGE_URI ==="
             docker pull $IMAGE_URI
 
@@ -155,10 +162,6 @@ jobs:
 
             echo "=== docker-compose.override.yml ==="
             cat docker-compose.override.yml
-
-            # Stop existing containers
-            echo "=== Stopping existing containers ==="
-            docker compose -f docker-compose.prod.yml -f docker-compose.override.yml down --remove-orphans || true
 
             # Start new containers
             echo "=== Starting containers ==="
