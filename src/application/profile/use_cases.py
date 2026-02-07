@@ -85,37 +85,12 @@ class ProfileSearchUseCase:
         query: str | None = None
     ) -> ProfileSearchResult:
         """이미지로 프로필 검색 (강화된 버전)"""
-        scammer_matches = []
         web_image_results = []
         search_links = []
         social_search_links = []
         uploaded_image_url = None
 
-        # 1. 얼굴 임베딩 추출 및 스캐머 DB 비교
-        embedding = await self.face_recognition.extract_embedding(image_data)
-
-        if embedding:
-            matches = await self.scammer_repository.find_by_face_embedding(
-                embedding, threshold=0.7
-            )
-
-            if matches:
-                for scammer, distance in matches:
-                    confidence = max(0, int((1 - distance) * 100))
-                    scammer_matches.append(ScammerMatch(
-                        scammer_id=scammer.id,
-                        name=scammer.name,
-                        confidence=confidence,
-                        report_count=scammer.report_count,
-                        distance=distance
-                    ))
-                logger.info(f"스캐머 DB에서 {len(matches)}개 일치 발견")
-            else:
-                logger.info("스캐머 DB에서 일치하는 얼굴 없음")
-        else:
-            logger.info("이미지에서 얼굴을 감지하지 못함")
-
-        # 2. 강화된 역이미지 검색 실행
+        # 1. 강화된 역이미지 검색 실행
         logger.info("강화된 역이미지 검색 시작...")
 
         try:
@@ -187,11 +162,11 @@ class ProfileSearchUseCase:
                 for link in ReverseSearchLink.all_links()
             ]
 
-        total_found = len(scammer_matches) + len(web_image_results)
+        total_found = len(web_image_results)
 
         return ProfileSearchResult(
             total_found=total_found,
-            scammer_matches=scammer_matches,
+            scammer_matches=[],
             reverse_search_links=[],  # 이제 search_links로 대체
             profile_matches=profile_matches,
             web_image_results=web_image_results,

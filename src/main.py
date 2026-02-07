@@ -13,6 +13,7 @@ from src.interfaces.api import (
     fraud_router,
     initialize_services,
     profile_router,
+    report_router,
     training_router,
     url_router,
     verify_router,
@@ -95,6 +96,7 @@ app.include_router(chat_router, prefix="/api")
 app.include_router(fraud_router, prefix="/api")
 app.include_router(training_router, prefix="/api")
 app.include_router(url_router, prefix="/api")
+app.include_router(report_router, prefix="/api")
 app.include_router(verify_router, prefix="/api")
 
 

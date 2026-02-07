@@ -1,24 +1,24 @@
+import asyncio
 import io
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 from PIL import Image
 
 from src.domain.deepfake import DeepfakeAnalysis, MediaType
 from src.infrastructure.ai import ImageQualityService
 from src.infrastructure.ai.deepfake_explainer import get_deepfake_explainer_service
-from src.infrastructure.external import SightengineService, OpenAIService
+from src.infrastructure.external import SightengineService
 from src.shared.exceptions import ValidationException
 
-# CLIP 및 Cross-EfficientViT 디텍터
-def get_clip_detector_safe():
-    """CLIP 디텍터 안전하게 가져오기"""
+# UnivFD 및 Cross-EfficientViT 디텍터
+def get_univfd_detector_safe():
+    """UnivFD 디텍터 안전하게 가져오기"""
     try:
-        from src.infrastructure.ai.clip_detector import get_clip_detector
-        return get_clip_detector()
+        from src.infrastructure.ai.univfd_detector import get_univfd_detector
+        return get_univfd_detector()
     except Exception as e:
-        logger.warning(f"CLIP detector not available: {e}")
+        logger.warning(f"UnivFD detector not available: {e}")
         return None
 
 def get_cross_evit_detector_safe():
@@ -91,9 +91,8 @@ class DeepfakeAnalysisResult:
 class AnalyzeImageUseCase:
     """이미지 딥페이크 분석 유스케이스"""
 
-    def __init__(self, sightengine: SightengineService, openai: Optional[OpenAIService] = None):
+    def __init__(self, sightengine: SightengineService):
         self.sightengine = sightengine
-        self.openai = openai
 
     async def execute(self, image_data: bytes) -> DeepfakeAnalysisResult:
         """이미지 분석 실행"""
@@ -103,54 +102,34 @@ class AnalyzeImageUseCase:
         # 0. GIF/PNG/WebP 등을 JPEG로 변환
         image_data = convert_to_jpeg(image_data)
 
-        # 1. 이미지 품질 체크 (blur detection)
-        quality_result = _image_quality_service.analyze(image_data)
+        # 1. 병렬 분석: 품질 체크 + Sightengine + UnivFD + EfficientViT
+        quality_result, sightengine_result, univfd_result, explainer_result = await asyncio.gather(
+            asyncio.to_thread(_image_quality_service.analyze, image_data),
+            self._run_sightengine(image_data),
+            self._run_univfd(image_data),
+            self._run_explainer(image_data),
+        )
 
-        # 2. Sightengine API 호출 (genai + deepfake 모델)
-        sightengine_result = None
         sightengine_confidence = 0
         sightengine_genai_score = 0
-        if self.sightengine.is_configured():
-            try:
-                logger.info("Using Sightengine API for AI/deepfake detection")
-                sightengine_result = await self.sightengine.analyze_image(image_data)
-                sightengine_confidence = sightengine_result.confidence
-                sightengine_genai_score = sightengine_result.details.get("genai_score", 0)
-            except Exception as e:
-                logger.warning(f"Sightengine API failed: {e}")
+        if sightengine_result:
+            sightengine_confidence = sightengine_result.confidence
+            sightengine_genai_score = sightengine_result.details.get("genai_score", 0)
 
-        # 3. CLIP 기반 AI 생성 이미지 탐지
-        clip_confidence = 0
-        clip_detector = get_clip_detector_safe()
-        if clip_detector and clip_detector.is_available():
-            try:
-                logger.info("Using CLIP for AI-generated image detection")
-                clip_result = clip_detector.analyze(image_data)
-                clip_confidence = clip_result.fake_score
-                logger.info(f"CLIP result: fake_score={clip_confidence:.1f}%")
-            except Exception as e:
-                logger.warning(f"CLIP detector failed: {e}")
+        univfd_confidence = univfd_result.fake_score if univfd_result else 0
 
-        # 4. EfficientViT 기반 딥페이크 탐지 시도 (히트맵 + 정확한 좌표)
-        explainer_result = None
-        try:
-            explainer = get_deepfake_explainer_service()
-            if explainer.is_available():
-                logger.info("Using EfficientViT DeepfakeExplainer for analysis")
-                explainer_result = explainer.analyze(image_data)
-        except Exception as e:
-            logger.warning(f"DeepfakeExplainer failed, falling back: {e}")
-
-        # 5. 앙상블: Sightengine + EfficientViT + CLIP 결과 통합
+        # 3. 앙상블: Sightengine + EfficientViT + UnivFD 가중 평균
         if explainer_result:
             # EfficientViT 결과
             evit_confidence = explainer_result.confidence
 
-            # 모든 모델 결과와 앙상블 (가장 높은 값 사용)
-            confidence = max(evit_confidence, sightengine_confidence, sightengine_genai_score, clip_confidence)
+            # 가중 평균 앙상블 (응답한 모델만 참여)
+            confidence = self._weighted_ensemble(
+                evit_confidence, sightengine_confidence, sightengine_genai_score, univfd_confidence
+            )
             is_deepfake = confidence >= 50
 
-            logger.info(f"Ensemble: EViT={evit_confidence:.1f}%, Sightengine={sightengine_confidence:.1f}%, GenAI={sightengine_genai_score:.1f}%, CLIP={clip_confidence:.1f}% -> Final={confidence:.1f}%")
+            logger.info(f"Ensemble: EViT={evit_confidence:.1f}%, Sightengine={sightengine_confidence:.1f}%, GenAI={sightengine_genai_score:.1f}%, UnivFD={univfd_confidence:.1f}% -> Final={confidence:.1f}%")
 
             # 마커 변환 (DetectionMarker -> dict)
             markers = [
@@ -226,7 +205,7 @@ class AnalyzeImageUseCase:
                 risk_level = "low"
 
             # AI 생성 이미지인 경우 메시지 다르게
-            ai_gen_score = max(sightengine_genai_score, clip_confidence)
+            ai_gen_score = max(sightengine_genai_score, univfd_confidence)
             if ai_gen_score >= 50 and ai_gen_score >= evit_confidence:
                 message = f"AI 생성 이미지 의심 ({confidence:.1f}%)"
             else:
@@ -245,7 +224,7 @@ class AnalyzeImageUseCase:
                     "sightengine_deepfake": sightengine_confidence,
                     "sightengine_genai": sightengine_genai_score,
                     "efficientvit": evit_confidence,
-                    "clip": clip_confidence,
+                    "univfd": univfd_confidence,
                 },
                 markers=markers,
                 overall_assessment=overall_assessment,
@@ -254,10 +233,9 @@ class AnalyzeImageUseCase:
                 ensemble_details=ensemble_details,
             )
 
-        # 4. Sightengine API 사용 (EfficientViT 사용 불가 시)
-        elif self.sightengine.is_configured():
-            analysis = await self.sightengine.analyze_image(image_data)
-            result = self._to_result(analysis)
+        # 4. Sightengine-only 경로 (EfficientViT 사용 불가 시)
+        elif sightengine_result:
+            result = self._to_result(sightengine_result)
 
             # 순수 알고리즘 기반 마커 생성 (OpenAI 미사용)
             result.markers = self._generate_algorithm_markers(
@@ -267,7 +245,7 @@ class AnalyzeImageUseCase:
                 result.is_deepfake, result.confidence
             )
 
-        # 5. 시뮬레이션 결과 (API 키 없을 때)
+        # 5. 시뮬레이션 결과 (API 키 없거나 모두 실패)
         else:
             result = self._simulate_result(MediaType.IMAGE)
             # 순수 알고리즘 기반 마커 생성 (OpenAI 미사용)
@@ -289,6 +267,65 @@ class AnalyzeImageUseCase:
             result.message = f"[⚠️ 저화질 이미지] {result.message}"
 
         return result
+
+    async def _run_sightengine(self, image_data: bytes):
+        """Sightengine API 비동기 호출"""
+        if not self.sightengine.is_configured():
+            return None
+        try:
+            logger.info("Using Sightengine API for AI/deepfake detection")
+            return await self.sightengine.analyze_image(image_data)
+        except Exception as e:
+            logger.warning(f"Sightengine API failed: {e}")
+            return None
+
+    async def _run_univfd(self, image_data: bytes):
+        """UnivFD 분석 (sync → async 변환)"""
+        detector = get_univfd_detector_safe()
+        if not detector or not detector.is_available():
+            return None
+        try:
+            logger.info("Using UnivFD for AI-generated image detection")
+            result = await asyncio.to_thread(detector.analyze, image_data)
+            logger.info(f"UnivFD result: fake_score={result.fake_score:.1f}%")
+            return result
+        except Exception as e:
+            logger.warning(f"UnivFD detector failed: {e}")
+            return None
+
+    async def _run_explainer(self, image_data: bytes):
+        """EfficientViT DeepfakeExplainer 분석 (sync → async 변환)"""
+        try:
+            explainer = get_deepfake_explainer_service()
+            if not explainer.is_available():
+                return None
+            logger.info("Using EfficientViT DeepfakeExplainer for analysis")
+            return await asyncio.to_thread(explainer.analyze, image_data)
+        except Exception as e:
+            logger.warning(f"DeepfakeExplainer failed, falling back: {e}")
+            return None
+
+    @staticmethod
+    def _weighted_ensemble(
+        evit: float, sightengine: float, genai: float, univfd: float
+    ) -> float:
+        """가중 평균 앙상블 — 응답한 모델만 참여, 0은 미응답으로 간주"""
+        # (score, weight) — EfficientViT 가장 신뢰, UnivFD 다음, Sightengine 보조
+        candidates = [
+            (evit, 0.40),
+            (univfd, 0.30),
+            (sightengine, 0.15),
+            (genai, 0.15),
+        ]
+        total_weight = 0.0
+        weighted_sum = 0.0
+        for score, weight in candidates:
+            if score > 0:
+                weighted_sum += score * weight
+                total_weight += weight
+        if total_weight == 0:
+            return 0.0
+        return weighted_sum / total_weight
 
     async def execute_from_url(self, url: str) -> DeepfakeAnalysisResult:
         """URL 이미지 분석 실행"""
@@ -513,31 +550,16 @@ class AnalyzeVideoUseCase:
         if not video_data:
             raise ValidationException("비디오 데이터가 필요합니다")
 
-        # 1. Cross-EfficientViT 분석 (DFDC AUC 0.951)
-        cross_evit_confidence = 0
-        cross_evit_result = None
-        cross_evit_detector = get_cross_evit_detector_safe()
-        if cross_evit_detector and cross_evit_detector.is_available():
-            try:
-                logger.info("Using Cross-EfficientViT for video deepfake detection")
-                cross_evit_result = cross_evit_detector.analyze_video(video_data)
-                cross_evit_confidence = cross_evit_result.confidence
-                logger.info(f"Cross-EfficientViT result: {cross_evit_confidence:.1f}%")
-            except Exception as e:
-                logger.warning(f"Cross-EfficientViT failed: {e}")
+        # 병렬 분석: Cross-EfficientViT + Sightengine
+        cross_evit_result, sightengine_result = await asyncio.gather(
+            self._run_cross_evit(video_data),
+            self._run_sightengine_video(video_data),
+        )
 
-        # 2. Sightengine API 분석
-        sightengine_confidence = 0
-        sightengine_result = None
-        if self.sightengine.is_configured():
-            try:
-                logger.info("Using Sightengine API for video analysis")
-                sightengine_result = await self.sightengine.analyze_video(video_data)
-                sightengine_confidence = sightengine_result.confidence
-            except Exception as e:
-                logger.warning(f"Sightengine video analysis failed: {e}")
+        cross_evit_confidence = cross_evit_result.confidence if cross_evit_result else 0
+        sightengine_confidence = sightengine_result.confidence if sightengine_result else 0
 
-        # 3. 앙상블: 두 결과 중 높은 값 사용
+        # 앙상블: 두 결과 중 높은 값 사용
         confidence = max(cross_evit_confidence, sightengine_confidence)
 
         # 둘 다 실패하면 시뮬레이션 결과
@@ -575,6 +597,31 @@ class AnalyzeVideoUseCase:
                 "model": "Cross-EfficientViT + Sightengine Ensemble",
             }
         )
+
+    async def _run_cross_evit(self, video_data: bytes):
+        """Cross-EfficientViT 비동기 분석 (sync → async 변환)"""
+        detector = get_cross_evit_detector_safe()
+        if not detector or not detector.is_available():
+            return None
+        try:
+            logger.info("Using Cross-EfficientViT for video deepfake detection")
+            result = await asyncio.to_thread(detector.analyze_video, video_data)
+            logger.info(f"Cross-EfficientViT result: {result.confidence:.1f}%")
+            return result
+        except Exception as e:
+            logger.warning(f"Cross-EfficientViT failed: {e}")
+            return None
+
+    async def _run_sightengine_video(self, video_data: bytes):
+        """Sightengine 비디오 비동기 분석"""
+        if not self.sightengine.is_configured():
+            return None
+        try:
+            logger.info("Using Sightengine API for video analysis")
+            return await self.sightengine.analyze_video(video_data)
+        except Exception as e:
+            logger.warning(f"Sightengine video analysis failed: {e}")
+            return None
 
     def _to_result(self, analysis: DeepfakeAnalysis) -> DeepfakeAnalysisResult:
         if analysis.is_deepfake:

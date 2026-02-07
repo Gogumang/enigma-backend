@@ -134,23 +134,34 @@ class EnhancedImageSearchService:
             )
 
     async def _upload_image(self, image_data: bytes) -> str | None:
-        """이미지 업로드 (여러 서비스 시도)"""
-        upload_services = [
-            self._upload_to_imgbb,
-            self._upload_to_catbox,
-            self._upload_to_litterbox,
+        """이미지 업로드 (여러 서비스 동시 시도, 먼저 성공한 것 사용)"""
+        tasks = [
+            asyncio.create_task(self._safe_upload(self._upload_to_imgbb, image_data)),
+            asyncio.create_task(self._safe_upload(self._upload_to_catbox, image_data)),
+            asyncio.create_task(self._safe_upload(self._upload_to_litterbox, image_data)),
         ]
 
-        for upload_fn in upload_services:
-            try:
-                url = await upload_fn(image_data)
-                if url:
-                    return url
-            except Exception as e:
-                logger.debug(f"Upload failed: {e}")
-                continue
+        # 먼저 성공한 결과 반환, 나머지 취소
+        while tasks:
+            done, tasks_set = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            tasks = list(tasks_set)
+            for task in done:
+                result = task.result()
+                if result:
+                    # 나머지 태스크 취소
+                    for t in tasks:
+                        t.cancel()
+                    return result
 
         return None
+
+    async def _safe_upload(self, upload_fn, image_data: bytes) -> str | None:
+        """업로드 함수를 안전하게 실행"""
+        try:
+            return await upload_fn(image_data)
+        except Exception as e:
+            logger.debug(f"Upload failed: {e}")
+            return None
 
     async def _upload_to_imgbb(self, image_data: bytes) -> str | None:
         """imgbb 업로드"""
@@ -530,46 +541,74 @@ class EnhancedImageSearchService:
         original_image: bytes,
         results: list[EnhancedSearchResult]
     ) -> list[EnhancedSearchResult]:
-        """얼굴 비교로 매치 스코어 계산"""
+        """얼굴 비교로 매치 스코어 계산 (병렬)"""
         if not self.face_recognition:
             return results
 
         try:
             import numpy as np
 
-            original_embedding = await self.face_recognition.extract_embedding(original_image)
+            original_embedding = await asyncio.to_thread(
+                self._extract_embedding_sync, original_image
+            )
             if not original_embedding:
                 return results
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                for result in results:
+            original_arr = np.array(original_embedding)
+            semaphore = asyncio.Semaphore(5)
+
+            async def score_one(result: EnhancedSearchResult) -> None:
+                async with semaphore:
                     try:
-                        # image_url이 dict일 수 있으므로 타입 체크
                         thumbnail = result.thumbnail_url if isinstance(result.thumbnail_url, str) else None
                         image = result.image_url if isinstance(result.image_url, str) else None
                         img_url = thumbnail or image
                         if not img_url or not img_url.startswith('http'):
-                            continue
+                            return
 
-                        response = await client.get(img_url, headers=self.headers)
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            response = await client.get(img_url, headers=self.headers)
                         if response.status_code != 200:
-                            continue
+                            return
 
-                        result_embedding = await self.face_recognition.extract_embedding(response.content)
+                        result_embedding = await asyncio.to_thread(
+                            self._extract_embedding_sync, response.content
+                        )
                         if result_embedding:
-                            arr1 = np.array(original_embedding)
                             arr2 = np.array(result_embedding)
-                            distance = float(np.linalg.norm(arr1 - arr2))
+                            distance = float(np.linalg.norm(original_arr - arr2))
                             result.match_score = max(0, min(100, (1 - distance / 2) * 100))
 
                     except Exception as e:
                         logger.debug(f"Score calculation failed: {e}")
-                        continue
+
+            await asyncio.gather(*(score_one(r) for r in results))
 
         except Exception as e:
             logger.warning(f"Match score error: {e}")
 
         return results
+
+    def _extract_embedding_sync(self, image_data: bytes) -> list[float] | None:
+        """동기 얼굴 임베딩 추출 (to_thread용)"""
+        try:
+            import io as _io
+            from PIL import Image as _Image
+            image = _Image.open(_io.BytesIO(image_data))
+            import numpy as _np
+            image_array = _np.array(image)
+            from deepface import DeepFace
+            embeddings = DeepFace.represent(
+                img_path=image_array,
+                model_name=self.face_recognition.model_name,
+                enforce_detection=False
+            )
+            if embeddings and len(embeddings) > 0:
+                return embeddings[0]["embedding"]
+            return None
+        except Exception as e:
+            logger.debug(f"Embedding extraction failed: {e}")
+            return None
 
 
 class EnhancedSocialMediaSearcher:

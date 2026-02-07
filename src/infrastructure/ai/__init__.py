@@ -7,6 +7,7 @@ from .cross_efficient_vit import (
     CrossEViTResult,
     get_cross_evit_detector,
 )
+from .univfd_detector import UnivFDDetector, get_univfd_detector
 
 __all__ = [
     "FaceRecognitionService",
@@ -18,6 +19,8 @@ __all__ = [
     "CLIPDeepfakeDetector",
     "CLIPDetectionResult",
     "get_clip_detector",
+    "UnivFDDetector",
+    "get_univfd_detector",
     "CrossEfficientViTDetector",
     "CrossEViTResult",
     "get_cross_evit_detector",

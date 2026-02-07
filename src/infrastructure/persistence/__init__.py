@@ -7,6 +7,7 @@ from .neo4j_relationship_repository import (
 )
 from .scammer_repository import JsonScammerRepository
 from .qdrant_repository import QdrantScamRepository, ScamPattern, RAGResult
+from .scam_report_repository import ScamReportRepository
 
 __all__ = [
     "JsonScammerRepository",
@@ -18,4 +19,5 @@ __all__ = [
     "QdrantScamRepository",
     "ScamPattern",
     "RAGResult",
+    "ScamReportRepository",
 ]
