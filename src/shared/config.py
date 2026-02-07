@@ -14,7 +14,6 @@ class Settings(BaseSettings):
 
     # Server
     port: int = 4000
-    cors_origin: str = "http://localhost:3000"
 
     # Sightengine
     sightengine_api_user: str = ""
