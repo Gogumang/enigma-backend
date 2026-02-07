@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -54,16 +53,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS 설정
 settings = get_settings()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
+# CORS는 nginx에서 처리 (infra/nginx/conf.d/default.conf)
 
 # 예외 핸들러
 @app.exception_handler(DomainException)
