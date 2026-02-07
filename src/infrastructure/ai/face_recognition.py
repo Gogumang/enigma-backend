@@ -98,6 +98,68 @@ class FaceRecognitionService:
             logger.error(f"Face detection failed: {e}")
             return False
 
+    async def extract_faces(self, image_data: bytes, min_confidence: float = 0.5) -> list[dict]:
+        """이미지에서 모든 얼굴을 감지하고 크롭된 이미지를 반환
+
+        Returns:
+            list of {
+                "image_base64": str (JPEG base64),
+                "facial_area": {"x": int, "y": int, "w": int, "h": int},
+                "confidence": float
+            }
+        """
+        try:
+            import base64
+
+            image = Image.open(io.BytesIO(image_data))
+            if image.mode == "RGBA":
+                image = image.convert("RGB")
+            image_array = np.array(image)
+
+            faces = DeepFace.extract_faces(
+                img_path=image_array,
+                enforce_detection=False
+            )
+
+            results = []
+            for face in faces:
+                confidence = face.get("confidence", 0)
+                if confidence < min_confidence:
+                    continue
+
+                area = face.get("facial_area", {})
+                x, y, w, h = area.get("x", 0), area.get("y", 0), area.get("w", 0), area.get("h", 0)
+
+                if w == 0 or h == 0:
+                    continue
+
+                # 여유 마진 추가 (20%)
+                margin_x = int(w * 0.2)
+                margin_y = int(h * 0.2)
+                x1 = max(0, x - margin_x)
+                y1 = max(0, y - margin_y)
+                x2 = min(image.width, x + w + margin_x)
+                y2 = min(image.height, y + h + margin_y)
+
+                cropped = image.crop((x1, y1, x2, y2))
+
+                # JPEG base64로 변환
+                buf = io.BytesIO()
+                cropped.save(buf, format="JPEG", quality=90)
+                face_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+                results.append({
+                    "image_base64": face_base64,
+                    "facial_area": {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1},
+                    "confidence": round(confidence, 3),
+                })
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Face extraction failed: {e}")
+            return []
+
     async def analyze_face(self, image_data: bytes) -> dict | None:
         """얼굴 분석 (나이, 성별, 감정 등)"""
         try:

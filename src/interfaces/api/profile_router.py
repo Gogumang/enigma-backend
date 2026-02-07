@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel
 
 from src.application.profile import ProfileSearchUseCase
-from src.interfaces.api.dependencies import get_profile_search_use_case
+from src.infrastructure.ai import FaceRecognitionService
+from src.interfaces.api.dependencies import get_profile_search_use_case, get_face_recognition_service
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
@@ -16,6 +17,64 @@ class SearchResponse(BaseModel):
     success: bool
     data: dict | None = None
     error: str | None = None
+
+
+@router.post("/detect-faces", response_model=SearchResponse)
+async def detect_faces(
+    image: UploadFile = File(...),
+    face_service: FaceRecognitionService = Depends(get_face_recognition_service)
+):
+    """
+    이미지에서 얼굴을 감지하고 크롭된 얼굴 목록을 반환
+
+    프론트엔드에서 모달로 얼굴을 선택한 뒤,
+    선택한 얼굴 이미지를 /profile/search에 전달하여 검색
+    """
+    if not image.content_type or not image.content_type.startswith("image/"):
+        return SearchResponse(
+            success=False,
+            error="이미지 파일만 업로드 가능합니다"
+        )
+
+    try:
+        image_data = await image.read()
+
+        if len(image_data) > 10 * 1024 * 1024:
+            return SearchResponse(
+                success=False,
+                error="파일 크기는 10MB 이하여야 합니다"
+            )
+
+        faces = await face_service.extract_faces(image_data)
+
+        if not faces:
+            return SearchResponse(
+                success=True,
+                data={
+                    "faces": [],
+                    "count": 0,
+                    "message": "감지된 얼굴이 없습니다"
+                }
+            )
+
+        return SearchResponse(
+            success=True,
+            data={
+                "faces": [
+                    {
+                        "index": i,
+                        "imageBase64": f.get("image_base64"),
+                        "facialArea": f.get("facial_area"),
+                        "confidence": f.get("confidence"),
+                    }
+                    for i, f in enumerate(faces)
+                ],
+                "count": len(faces),
+            }
+        )
+
+    except Exception as e:
+        return SearchResponse(success=False, error=str(e))
 
 
 @router.post("/search", response_model=SearchResponse)
