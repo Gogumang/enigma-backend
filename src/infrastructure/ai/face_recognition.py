@@ -98,7 +98,7 @@ class FaceRecognitionService:
             logger.error(f"Face detection failed: {e}")
             return False
 
-    async def extract_faces(self, image_data: bytes, min_confidence: float = 0.5) -> list[dict]:
+    async def extract_faces(self, image_data: bytes, min_confidence: float = 0.75) -> list[dict]:
         """이미지에서 모든 얼굴을 감지하고 크롭된 이미지를 반환
 
         Returns:

@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # SerpApi (역이미지 검색)
     serpapi_key: str = ""
 
+    # Google Safe Browsing
+    google_safe_browsing_key: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

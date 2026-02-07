@@ -219,111 +219,105 @@ async def check_account_pattern(account: str, bank_code: str | None) -> dict:
     return analysis
 
 
+async def perform_fraud_check(check_type: str, value: str, bank_code: str | None = None) -> dict:
+    """사기 이력 조회 핵심 로직 — 라우터·종합분석에서 공용 사용"""
+    check_type = check_type.upper()
+    value = value.replace("-", "").replace(" ", "").strip()
+
+    if check_type not in ["PHONE", "ACCOUNT"]:
+        raise ValueError("지원하는 조회 유형: PHONE (전화번호), ACCOUNT (계좌번호)")
+
+    response_data = {
+        "status": "safe",
+        "type": check_type,
+        "value": value,
+        "displayValue": value,
+        "sources": [],
+        "totalRecords": 0,
+        "message": "",
+        "recommendations": []
+    }
+
+    # 1. 패턴 분석
+    if check_type == "PHONE":
+        pattern_analysis = await check_phone_pattern(value)
+        response_data["patternAnalysis"] = pattern_analysis
+        if pattern_analysis.get("warnings"):
+            response_data["recommendations"].extend(pattern_analysis["warnings"])
+    elif check_type == "ACCOUNT":
+        pattern_analysis = await check_account_pattern(value, bank_code)
+        response_data["patternAnalysis"] = pattern_analysis
+        if bank_code:
+            response_data["bank"] = BANK_CODES.get(bank_code, bank_code)
+
+    # 2. 더치트 검색
+    thecheat_result = await search_thecheat(check_type, value)
+    response_data["sources"].append(thecheat_result)
+    if thecheat_result.get("found"):
+        response_data["status"] = "danger"
+        response_data["totalRecords"] += len(thecheat_result.get("records", []))
+
+    # 3. 경찰청 정보
+    police_result = await search_police_cyber(check_type, value)
+    response_data["sources"].append(police_result)
+
+    # 4. 계좌번호인 경우 금융감독원 정보 추가
+    if check_type == "ACCOUNT":
+        fss_result = await search_fss(value, bank_code)
+        response_data["sources"].append(fss_result)
+
+    # 5. 최종 메시지 생성
+    if response_data["status"] == "danger":
+        response_data["message"] = f"⚠️ 사기 신고 이력이 발견되었습니다! ({response_data['totalRecords']}건)"
+        response_data["recommendations"].extend([
+            "이 번호/계좌와의 거래를 즉시 중단하세요",
+            "이미 송금했다면 즉시 경찰(112)에 신고하세요",
+            "금융감독원(1332)에 피해 상담을 받으세요"
+        ])
+    else:
+        response_data["message"] = "현재까지 신고된 사기 이력이 없습니다."
+        response_data["recommendations"].extend([
+            "신고 이력이 없다고 해서 100% 안전한 것은 아닙니다",
+            "처음 거래하는 상대방에게는 소액 먼저 테스트하세요",
+            "의심스러운 경우 경찰청 사이버안전국에 문의하세요"
+        ])
+
+    # 6. 추가 확인 링크
+    response_data["additionalLinks"] = [
+        {
+            "name": "더치트에서 직접 검색",
+            "url": thecheat_result.get("searchUrl", "https://thecheat.co.kr"),
+            "description": "사기 피해 신고 데이터베이스"
+        },
+        {
+            "name": "경찰청 사이버범죄 신고",
+            "url": "https://ecrm.police.go.kr",
+            "description": "사이버범죄 신고 및 상담"
+        },
+        {
+            "name": "금융감독원 보이스피싱 조회",
+            "url": "https://www.fss.or.kr/fss/main/sub1sub3.do",
+            "description": "피해계좌 조회 및 상담"
+        },
+        {
+            "name": "국가정보원 피싱사이트 신고",
+            "url": "https://www.nis.go.kr",
+            "description": "피싱사이트 신고"
+        }
+    ]
+
+    return response_data
+
+
 @router.post("/check", response_model=FraudCheckResponse)
 async def check_fraud(request: FraudCheckRequest):
-    """전화번호, 계좌번호의 사기 이력 조회
-
-    여러 소스에서 사기 신고 이력을 검색합니다:
-    - 더치트 (thecheat.co.kr): 사기 피해 신고 커뮤니티
-    - 경찰청 사이버안전국: 사이버범죄 신고/조회
-    - 금융감독원: 보이스피싱 피해계좌 조회
-    """
+    """전화번호, 계좌번호의 사기 이력 조회"""
     try:
-        check_type = request.type.upper()
-        value = request.value.replace("-", "").replace(" ", "").strip()
-
-        if check_type not in ["PHONE", "ACCOUNT"]:
-            return FraudCheckResponse(
-                success=False,
-                error="지원하는 조회 유형: PHONE (전화번호), ACCOUNT (계좌번호)"
-            )
-
-        # 기본 응답 구조
-        response_data = {
-            "status": "safe",
-            "type": check_type,
-            "value": value,
-            "displayValue": request.value,  # 원본 형식 유지
-            "sources": [],
-            "totalRecords": 0,
-            "message": "",
-            "recommendations": []
-        }
-
-        # 1. 패턴 분석
-        if check_type == "PHONE":
-            pattern_analysis = await check_phone_pattern(value)
-            response_data["patternAnalysis"] = pattern_analysis
-
-            if pattern_analysis.get("warnings"):
-                response_data["recommendations"].extend(pattern_analysis["warnings"])
-
-        elif check_type == "ACCOUNT":
-            pattern_analysis = await check_account_pattern(value, request.bank_code)
-            response_data["patternAnalysis"] = pattern_analysis
-
-            if request.bank_code:
-                response_data["bank"] = BANK_CODES.get(request.bank_code, request.bank_code)
-
-        # 2. 더치트 검색
-        thecheat_result = await search_thecheat(check_type, value)
-        response_data["sources"].append(thecheat_result)
-
-        if thecheat_result.get("found"):
-            response_data["status"] = "danger"
-            response_data["totalRecords"] += len(thecheat_result.get("records", []))
-
-        # 3. 경찰청 정보
-        police_result = await search_police_cyber(check_type, value)
-        response_data["sources"].append(police_result)
-
-        # 4. 계좌번호인 경우 금융감독원 정보 추가
-        if check_type == "ACCOUNT":
-            fss_result = await search_fss(value, request.bank_code)
-            response_data["sources"].append(fss_result)
-
-        # 5. 최종 메시지 생성
-        if response_data["status"] == "danger":
-            response_data["message"] = f"⚠️ 사기 신고 이력이 발견되었습니다! ({response_data['totalRecords']}건)"
-            response_data["recommendations"].extend([
-                "이 번호/계좌와의 거래를 즉시 중단하세요",
-                "이미 송금했다면 즉시 경찰(112)에 신고하세요",
-                "금융감독원(1332)에 피해 상담을 받으세요"
-            ])
-        else:
-            response_data["message"] = "현재까지 신고된 사기 이력이 없습니다."
-            response_data["recommendations"].extend([
-                "신고 이력이 없다고 해서 100% 안전한 것은 아닙니다",
-                "처음 거래하는 상대방에게는 소액 먼저 테스트하세요",
-                "의심스러운 경우 경찰청 사이버안전국에 문의하세요"
-            ])
-
-        # 6. 추가 확인 링크
-        response_data["additionalLinks"] = [
-            {
-                "name": "더치트에서 직접 검색",
-                "url": thecheat_result.get("searchUrl", "https://thecheat.co.kr"),
-                "description": "사기 피해 신고 데이터베이스"
-            },
-            {
-                "name": "경찰청 사이버범죄 신고",
-                "url": "https://ecrm.police.go.kr",
-                "description": "사이버범죄 신고 및 상담"
-            },
-            {
-                "name": "금융감독원 보이스피싱 조회",
-                "url": "https://www.fss.or.kr/fss/main/sub1sub3.do",
-                "description": "피해계좌 조회 및 상담"
-            },
-            {
-                "name": "국가정보원 피싱사이트 신고",
-                "url": "https://www.nis.go.kr",
-                "description": "피싱사이트 신고"
-            }
-        ]
-
-        return FraudCheckResponse(success=True, data=response_data)
-
+        data = await perform_fraud_check(request.type, request.value, request.bank_code)
+        data["displayValue"] = request.value  # 원본 형식 유지
+        return FraudCheckResponse(success=True, data=data)
+    except ValueError as e:
+        return FraudCheckResponse(success=False, error=str(e))
     except Exception as e:
         logger.error(f"Fraud check failed: {e}", exc_info=True)
         return FraudCheckResponse(success=False, error=str(e))

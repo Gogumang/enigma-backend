@@ -152,6 +152,49 @@ async def unified_verify(request: VerifyRequest):
         return VerifyResponse(success=False, error=str(e))
 
 
+@router.post("/url", response_model=VerifyResponse)
+async def verify_url_endpoint(request: VerifyRequest):
+    """URL 검증 전용 엔드포인트"""
+    try:
+        value = request.value.strip()
+        if not value:
+            return VerifyResponse(success=False, error="URL을 입력해주세요")
+        if not value.startswith(("http://", "https://")):
+            value = f"https://{value}"
+        return await verify_url(value, request.value.strip())
+    except Exception as e:
+        logger.error(f"URL verify failed: {e}", exc_info=True)
+        return VerifyResponse(success=False, error=str(e))
+
+
+@router.post("/phone", response_model=VerifyResponse)
+async def verify_phone_endpoint(request: VerifyRequest):
+    """전화번호 검증 전용 엔드포인트"""
+    try:
+        value = request.value.strip()
+        if not value:
+            return VerifyResponse(success=False, error="전화번호를 입력해주세요")
+        digits = re.sub(r'[^\d]', '', value)
+        return await verify_phone(digits, value)
+    except Exception as e:
+        logger.error(f"Phone verify failed: {e}", exc_info=True)
+        return VerifyResponse(success=False, error=str(e))
+
+
+@router.post("/account", response_model=VerifyResponse)
+async def verify_account_endpoint(request: VerifyRequest):
+    """계좌번호 검증 전용 엔드포인트"""
+    try:
+        value = request.value.strip()
+        if not value:
+            return VerifyResponse(success=False, error="계좌번호를 입력해주세요")
+        digits = re.sub(r'[^\d]', '', value)
+        return await verify_account(digits, value)
+    except Exception as e:
+        logger.error(f"Account verify failed: {e}", exc_info=True)
+        return VerifyResponse(success=False, error=str(e))
+
+
 async def verify_url(url: str, original_value: str) -> VerifyResponse:
     """URL 검증"""
     try:

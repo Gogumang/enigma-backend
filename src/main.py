@@ -4,11 +4,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.interfaces.api import (
     chat_router,
+    comprehensive_router,
     deepfake_router,
     fraud_router,
     initialize_services,
@@ -56,7 +58,14 @@ app = FastAPI(
 
 settings = get_settings()
 
-# CORS는 nginx에서 처리 (infra/nginx/conf.d/default.conf)
+# CORS 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin.split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 예외 핸들러
 @app.exception_handler(DomainException)
@@ -96,6 +105,7 @@ app.include_router(chat_router, prefix="/api")
 app.include_router(fraud_router, prefix="/api")
 app.include_router(training_router, prefix="/api")
 app.include_router(url_router, prefix="/api")
+app.include_router(comprehensive_router, prefix="/api")
 app.include_router(report_router, prefix="/api")
 app.include_router(verify_router, prefix="/api")
 

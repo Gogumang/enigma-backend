@@ -233,124 +233,118 @@ def analyze_url_patterns(url: str, domain: str) -> tuple[list[str], int]:
     return suspicious_patterns, risk_score
 
 
+async def perform_url_check(url: str) -> dict:
+    """URL 안전성 검사 핵심 로직 — 라우터·종합분석에서 공용 사용"""
+    url = url.strip()
+
+    # URL 정규화
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+
+    parsed = urlparse(url)
+    domain = parsed.hostname or ""
+
+    # 1. 단축 URL인지 확인하고 확장
+    domain_lower = domain.lower()
+    is_short_url = any(short_domain in domain_lower for short_domain in SHORT_URL_DOMAINS)
+
+    # 추가 단축 URL 패턴 감지
+    if not is_short_url:
+        short_patterns = ["link", "url", "short", "tiny", ".gg", ".to", ".cc", ".me"]
+        if any(p in domain_lower for p in short_patterns):
+            path = parsed.path.strip("/")
+            if len(path) > 0 and len(path) <= 15 and "/" not in path:
+                is_short_url = True
+
+    expansion_result = None
+
+    if is_short_url:
+        expansion_result = await expand_short_url(url)
+        if expansion_result["final_url"] != url:
+            url = expansion_result["final_url"]
+            try:
+                parsed = urlparse(url)
+                domain = parsed.hostname or ""
+            except:
+                pass
+
+    # 2. 패턴 분석
+    suspicious_patterns, risk_score = analyze_url_patterns(url, domain)
+
+    # 3. HTTPS 검사
+    is_https = parsed.scheme == "https"
+    if not is_https:
+        suspicious_patterns.append("HTTPS 미사용 (암호화되지 않은 연결)")
+        risk_score += 20
+
+    # 4. 단축 URL 자체도 위험 요소
+    if is_short_url:
+        suspicious_patterns.append("단축 URL 사용 (최종 목적지 확인됨)")
+        risk_score += 10
+        if expansion_result and expansion_result["redirect_count"] > 3:
+            suspicious_patterns.append(f'과도한 리다이렉트 ({expansion_result["redirect_count"]}회)')
+            risk_score += 20
+
+    # 5. Google Safe Browsing 검사
+    safe_browsing_result = await check_google_safe_browsing(url)
+    if safe_browsing_result:
+        if safe_browsing_result.get("is_dangerous"):
+            threats = safe_browsing_result.get("threats", [])
+            threat_names = {
+                "MALWARE": "악성코드",
+                "SOCIAL_ENGINEERING": "소셜 엔지니어링(피싱)",
+                "UNWANTED_SOFTWARE": "원치 않는 소프트웨어",
+                "POTENTIALLY_HARMFUL_APPLICATION": "잠재적 유해 앱"
+            }
+            for threat in threats:
+                suspicious_patterns.append(f'Google 경고: {threat_names.get(threat, threat)}')
+            risk_score += 50
+
+    # 6. 위험도 판단
+    status = "safe"
+    if risk_score >= 60:
+        status = "danger"
+    elif risk_score >= 30:
+        status = "warning"
+
+    status_messages = {
+        "safe": "안전해 보입니다. 하지만 개인정보 입력 시 항상 주의하세요.",
+        "warning": "의심스러운 패턴이 감지되었습니다. 신중하게 접근하세요.",
+        "danger": "위험한 사이트일 가능성이 높습니다. 접속을 권장하지 않습니다!"
+    }
+
+    original_url = url  # 정규화된 URL
+    response_data = {
+        "status": status,
+        "originalUrl": original_url,
+        "finalUrl": url,
+        "domain": domain,
+        "isHttps": is_https,
+        "isShortUrl": is_short_url,
+        "riskScore": min(100, risk_score),
+        "suspiciousPatterns": suspicious_patterns,
+        "message": status_messages[status],
+    }
+
+    if expansion_result:
+        response_data["expansion"] = {
+            "redirectCount": expansion_result["redirect_count"],
+            "redirectChain": expansion_result["redirect_chain"]
+        }
+
+    if safe_browsing_result:
+        response_data["googleSafeBrowsing"] = safe_browsing_result
+
+    return response_data
+
+
 @router.post("/check", response_model=UrlCheckResponse)
 async def check_url_safety(request: UrlCheckRequest):
     """URL 안전성 검사 - 단축 URL 확장, 피싱, 악성코드, 사기 사이트 탐지"""
     try:
-        url = request.url.strip()
-
-        # URL 정규화
-        if not url.startswith("http://") and not url.startswith("https://"):
-            url = "https://" + url
-
-        try:
-            parsed = urlparse(url)
-            domain = parsed.hostname or ""
-        except Exception:
-            return UrlCheckResponse(
-                success=False,
-                error="올바른 URL 형식이 아닙니다"
-            )
-
-        # 1. 단축 URL인지 확인하고 확장
-        domain_lower = domain.lower()
-        is_short_url = any(short_domain in domain_lower for short_domain in SHORT_URL_DOMAINS)
-
-        # 추가 단축 URL 패턴 감지
-        if not is_short_url:
-            # 도메인에 link, url, short, tiny, gg 등이 포함된 짧은 도메인
-            short_patterns = ["link", "url", "short", "tiny", ".gg", ".to", ".cc", ".me"]
-            if any(p in domain_lower for p in short_patterns):
-                # 경로가 짧으면 (보통 단축 URL은 /abc123 형태)
-                path = parsed.path.strip("/")
-                if len(path) > 0 and len(path) <= 15 and "/" not in path:
-                    is_short_url = True
-
-        expansion_result = None
-
-        if is_short_url:
-            expansion_result = await expand_short_url(url)
-            if expansion_result["final_url"] != url:
-                # 최종 URL로 분석 대상 변경
-                url = expansion_result["final_url"]
-                try:
-                    parsed = urlparse(url)
-                    domain = parsed.hostname or ""
-                except:
-                    pass
-
-        # 2. 패턴 분석
-        suspicious_patterns, risk_score = analyze_url_patterns(url, domain)
-
-        # 3. HTTPS 검사
-        is_https = parsed.scheme == "https"
-        if not is_https:
-            suspicious_patterns.append("HTTPS 미사용 (암호화되지 않은 연결)")
-            risk_score += 20
-
-        # 4. 단축 URL 자체도 위험 요소
-        if is_short_url:
-            suspicious_patterns.append("단축 URL 사용 (최종 목적지 확인됨)")
-            risk_score += 10
-
-            # 리다이렉트 체인이 긴 경우
-            if expansion_result and expansion_result["redirect_count"] > 3:
-                suspicious_patterns.append(f'과도한 리다이렉트 ({expansion_result["redirect_count"]}회)')
-                risk_score += 20
-
-        # 5. Google Safe Browsing 검사
-        safe_browsing_result = await check_google_safe_browsing(url)
-        if safe_browsing_result:
-            if safe_browsing_result.get("is_dangerous"):
-                threats = safe_browsing_result.get("threats", [])
-                threat_names = {
-                    "MALWARE": "악성코드",
-                    "SOCIAL_ENGINEERING": "소셜 엔지니어링(피싱)",
-                    "UNWANTED_SOFTWARE": "원치 않는 소프트웨어",
-                    "POTENTIALLY_HARMFUL_APPLICATION": "잠재적 유해 앱"
-                }
-                for threat in threats:
-                    suspicious_patterns.append(f'Google 경고: {threat_names.get(threat, threat)}')
-                risk_score += 50
-
-        # 6. 위험도 판단
-        status = "safe"
-        if risk_score >= 60:
-            status = "danger"
-        elif risk_score >= 30:
-            status = "warning"
-
-        status_messages = {
-            "safe": "안전해 보입니다. 하지만 개인정보 입력 시 항상 주의하세요.",
-            "warning": "의심스러운 패턴이 감지되었습니다. 신중하게 접근하세요.",
-            "danger": "위험한 사이트일 가능성이 높습니다. 접속을 권장하지 않습니다!"
-        }
-
-        response_data = {
-            "status": status,
-            "originalUrl": request.url,
-            "finalUrl": url,
-            "domain": domain,
-            "isHttps": is_https,
-            "isShortUrl": is_short_url,
-            "riskScore": min(100, risk_score),
-            "suspiciousPatterns": suspicious_patterns,
-            "message": status_messages[status],
-        }
-
-        # 단축 URL 확장 정보 추가
-        if expansion_result:
-            response_data["expansion"] = {
-                "redirectCount": expansion_result["redirect_count"],
-                "redirectChain": expansion_result["redirect_chain"]
-            }
-
-        # Safe Browsing 결과 추가
-        if safe_browsing_result:
-            response_data["googleSafeBrowsing"] = safe_browsing_result
-
-        return UrlCheckResponse(success=True, data=response_data)
-
+        data = await perform_url_check(request.url)
+        data["originalUrl"] = request.url  # 원본 입력 값 유지
+        return UrlCheckResponse(success=True, data=data)
     except Exception as e:
         logger.error(f"URL check failed: {e}", exc_info=True)
         return UrlCheckResponse(success=False, error=str(e))
