@@ -4,9 +4,9 @@ FastAPI의 Depends를 통해 유스케이스와 서비스를 주입
 """
 from functools import lru_cache
 
-from src.application.chat import AnalyzeChatUseCase, ChatbotUseCase, GetPatternsUseCase
+from src.application.chat import AnalyzeChatUseCase
 from src.application.deepfake import AnalyzeImageUseCase, AnalyzeVideoUseCase
-from src.application.profile import ProfileSearchUseCase, ReportScammerUseCase
+from src.application.profile import ProfileSearchUseCase
 from src.infrastructure.ai import FaceRecognitionService
 from src.infrastructure.external import (
     ImageSearchScraper,
@@ -17,7 +17,6 @@ from src.infrastructure.external import (
 from src.infrastructure.persistence import (
     JsonScammerRepository,
     QdrantScamRepository,
-    ScammerNetworkRepository,
     Neo4jRelationshipRepository,
 )
 
@@ -49,11 +48,6 @@ def get_qdrant_repository() -> QdrantScamRepository:
 
 
 @lru_cache
-def get_scammer_network_repository() -> ScammerNetworkRepository:
-    return ScammerNetworkRepository()
-
-
-@lru_cache
 def get_relationship_repository() -> Neo4jRelationshipRepository:
     return Neo4jRelationshipRepository()
 
@@ -76,13 +70,6 @@ def get_profile_search_use_case() -> ProfileSearchUseCase:
         scammer_repository=get_scammer_repository(),
         image_search_scraper=get_image_search_scraper(),
         social_media_searcher=get_social_media_searcher()
-    )
-
-
-def get_report_scammer_use_case() -> ReportScammerUseCase:
-    return ReportScammerUseCase(
-        face_recognition=get_face_recognition_service(),
-        scammer_repository=get_scammer_repository()
     )
 
 
@@ -111,16 +98,6 @@ def get_analyze_chat_use_case() -> AnalyzeChatUseCase:
     )
 
 
-def get_chatbot_use_case() -> ChatbotUseCase:
-    return ChatbotUseCase(
-        ai_service=get_openai_service()
-    )
-
-
-def get_patterns_use_case() -> GetPatternsUseCase:
-    return GetPatternsUseCase()
-
-
 # ==================== 초기화 함수 ====================
 
 async def initialize_services():
@@ -147,13 +124,6 @@ async def initialize_services():
         await qdrant_repo.initialize()
     except Exception as e:
         logger.warning(f"Qdrant 초기화 실패 (서버는 계속 동작): {e}")
-
-    # ScammerNetworkRepository 초기화 (스캐머 네트워크 분석)
-    try:
-        network_repo = get_scammer_network_repository()
-        await network_repo.initialize()
-    except Exception as e:
-        logger.warning(f"Neo4j 스캐머 네트워크 초기화 실패 (서버는 계속 동작): {e}")
 
     # Neo4jRelationshipRepository 초기화 (사용자 관계 분석)
     try:

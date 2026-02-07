@@ -13,7 +13,6 @@ from src.interfaces.api import (
     deepfake_router,
     fraud_router,
     initialize_services,
-    network_router,
     profile_router,
     training_router,
     url_router,
@@ -102,7 +101,6 @@ app.include_router(profile_router, prefix="/api")
 app.include_router(deepfake_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(fraud_router, prefix="/api")
-app.include_router(network_router, prefix="/api")
 app.include_router(training_router, prefix="/api")
 app.include_router(url_router, prefix="/api")
 app.include_router(verify_router, prefix="/api")

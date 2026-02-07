@@ -14,10 +14,6 @@ from src.interfaces.api.dependencies import (
 router = APIRouter(prefix="/deepfake", tags=["deepfake"])
 
 
-class AnalyzeUrlRequest(BaseModel):
-    url: str
-
-
 class AnalysisResponse(BaseModel):
     success: bool
     data: dict | None = None
@@ -64,24 +60,6 @@ async def analyze_image(
     try:
         image_data = await file.read()
         result = await use_case.execute(image_data)
-
-        return AnalysisResponse(
-            success=True,
-            data=_result_to_dict(result)
-        )
-
-    except Exception as e:
-        return AnalysisResponse(success=False, error=str(e))
-
-
-@router.post("/analyze/url", response_model=AnalysisResponse)
-async def analyze_image_url(
-    request: AnalyzeUrlRequest,
-    use_case: AnalyzeImageUseCase = Depends(get_analyze_image_use_case)
-):
-    """URL 이미지 딥페이크 분석"""
-    try:
-        result = await use_case.execute_from_url(request.url)
 
         return AnalysisResponse(
             success=True,

@@ -329,15 +329,3 @@ async def check_fraud(request: FraudCheckRequest):
         return FraudCheckResponse(success=False, error=str(e))
 
 
-@router.get("/banks", response_model=FraudCheckResponse)
-async def get_bank_list():
-    """지원하는 은행 목록 조회"""
-    return FraudCheckResponse(
-        success=True,
-        data={
-            "banks": [
-                {"code": code, "name": name}
-                for code, name in BANK_CODES.items()
-            ]
-        }
-    )
