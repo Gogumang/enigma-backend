@@ -21,7 +21,7 @@ RUN python -m venv /app/.venv && \
     pip install --no-cache-dir --upgrade pip "setuptools<81" wheel && \
     pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir . && \
-    pip install --no-cache-dir git+https://github.com/openai/CLIP.git
+    PIP_CONSTRAINT=/dev/null pip install --no-cache-dir --no-build-isolation git+https://github.com/openai/CLIP.git
 
 # Clean up Python cache
 RUN find /app/.venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
