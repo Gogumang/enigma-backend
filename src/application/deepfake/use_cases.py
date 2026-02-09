@@ -272,22 +272,81 @@ class AnalyzeImageUseCase:
                 },
             )
 
+            # 6가지 알고리즘 검사 (GenD-PE 없이 독립 실행)
+            algorithm_checks = await self._run_algorithm_checks_standalone(image_data)
+
+            # Sightengine genai 결과 추가
+            if sightengine_genai_score > 0:
+                algorithm_checks.append({
+                    "name": "ai_generated",
+                    "passed": sightengine_genai_score < 50,
+                    "score": sightengine_genai_score,
+                    "description": f"AI 생성 이미지 감지 (DALL-E, Midjourney, Stable Diffusion 등): {sightengine_genai_score:.1f}%",
+                })
+
+            result.algorithm_checks = algorithm_checks
+
+            # 기술적 지표 생성
+            for check in algorithm_checks:
+                if not check["passed"]:
+                    indicator_names = {
+                        "frequency_analysis": "주파수 도메인 이상",
+                        "skin_texture": "피부 텍스처 불일치",
+                        "color_consistency": "색상/조명 불일치",
+                        "edge_artifacts": "경계 아티팩트",
+                        "noise_pattern": "노이즈 패턴 이상",
+                        "compression_artifacts": "압축 아티팩트 이상",
+                        "ai_generated": "AI 생성 이미지",
+                    }
+                    result.technical_indicators.append({
+                        "name": indicator_names.get(check["name"], check["name"]),
+                        "description": check["description"],
+                        "score": check["score"],
+                    })
+
             # 마커 및 평가 생성
             result.markers = self._generate_algorithm_markers(
                 image_data, result.is_deepfake, result.confidence
             )
-            result.overall_assessment = self._generate_simple_assessment(
-                result.is_deepfake, result.confidence
+            result.markers = self._enhance_markers_with_algorithm_info(
+                result.markers, algorithm_checks, is_deepfake, confidence
+            )
+            result.overall_assessment = self._generate_assessment_from_algorithms(
+                result.is_deepfake, result.confidence, algorithm_checks
             )
 
         # 5. 시뮬레이션 결과 (모든 모델 실패)
         else:
             result = self._simulate_result(MediaType.IMAGE)
+
+            # 6가지 알고리즘 검사 (독립 실행)
+            algorithm_checks = await self._run_algorithm_checks_standalone(image_data)
+            result.algorithm_checks = algorithm_checks
+
+            for check in algorithm_checks:
+                if not check["passed"]:
+                    indicator_names = {
+                        "frequency_analysis": "주파수 도메인 이상",
+                        "skin_texture": "피부 텍스처 불일치",
+                        "color_consistency": "색상/조명 불일치",
+                        "edge_artifacts": "경계 아티팩트",
+                        "noise_pattern": "노이즈 패턴 이상",
+                        "compression_artifacts": "압축 아티팩트 이상",
+                    }
+                    result.technical_indicators.append({
+                        "name": indicator_names.get(check["name"], check["name"]),
+                        "description": check["description"],
+                        "score": check["score"],
+                    })
+
             result.markers = self._generate_algorithm_markers(
                 image_data, result.is_deepfake, result.confidence
             )
-            result.overall_assessment = self._generate_simple_assessment(
-                result.is_deepfake, result.confidence
+            result.markers = self._enhance_markers_with_algorithm_info(
+                result.markers, algorithm_checks, result.is_deepfake, result.confidence
+            )
+            result.overall_assessment = self._generate_assessment_from_algorithms(
+                result.is_deepfake, result.confidence, algorithm_checks
             )
 
         # 품질 정보 추가
@@ -352,6 +411,30 @@ class AnalyzeImageUseCase:
         except Exception as e:
             logger.warning(f"DeepfakeExplainer failed, falling back: {e}")
             return None
+
+    async def _run_algorithm_checks_standalone(self, image_data: bytes) -> list[dict]:
+        """GenD-PE 없이 독립적으로 6가지 알고리즘 검사 실행"""
+        try:
+            import numpy as np
+            from src.infrastructure.ai.deepfake_explainer.service import run_all_algorithm_checks
+
+            img = Image.open(io.BytesIO(image_data))
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            image_array = np.array(img)
+            checks = await asyncio.to_thread(run_all_algorithm_checks, image_array)
+            return [
+                {
+                    "name": c.name,
+                    "passed": c.passed,
+                    "score": c.score,
+                    "description": c.description,
+                }
+                for c in checks
+            ]
+        except Exception as e:
+            logger.warning(f"Standalone algorithm checks failed: {e}")
+            return []
 
     @staticmethod
     def _weighted_ensemble(
