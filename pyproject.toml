@@ -22,8 +22,6 @@ dependencies = [
     "numpy>=1.26.0,<2.0.0",
     "mediapipe>=0.10.0",
     "opencv-python>=4.8.0",
-    "efficientnet-pytorch>=0.7.1",
-    "einops>=0.7.0",
     "realesrgan",
 
     # HuggingFace / Vision models

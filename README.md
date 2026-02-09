@@ -8,8 +8,8 @@ AI 기반 로맨스 스캠 종합 예방 플랫폼 백엔드 API 서버
 
 ### 1. 딥페이크 탐지
 
-- **이미지 탐지**: EfficientViT + Sightengine + UnivFD + CLIP 4종 앙상블
-- **비디오 탐지**: Cross-EfficientViT + Sightengine 앙상블
+- **이미지 탐지**: GenD-PE + SigLIP + Sightengine 앙상블
+- **비디오 탐지**: GenConViT + Sightengine 앙상블
 - **AI 생성 이미지 탐지**: DALL-E, Midjourney, Stable Diffusion 등 감지
 - 의심 영역 좌표(마커) 및 히트맵 시각화 제공
 - 이미지 품질 기반 신뢰도 자동 보정
@@ -70,7 +70,7 @@ AI 기반 로맨스 스캠 종합 예방 플랫폼 백엔드 API 서버
 | **Architecture** | DDD (Domain-Driven Design) |
 | **LLM** | OpenAI GPT-4o |
 | **AI Workflow** | LangGraph, LangChain |
-| **Deepfake 탐지** | EfficientViT, Cross-EfficientViT, UnivFD, CLIP ViT-B/32 |
+| **Deepfake 탐지** | GenD-PE, GenConViT-ED, SigLIP-L/14 |
 | **얼굴 인식** | DeepFace (VGG-Face), MediaPipe, MTCNN |
 | **외부 API** | Sightengine, Google Safe Browsing, 경찰청 API, 사이버캅 API |
 | **Vector DB** | Qdrant (대화 패턴 의미 검색) |
@@ -83,19 +83,28 @@ AI 기반 로맨스 스캠 종합 예방 플랫폼 백엔드 API 서버
 
 ### 이미지 딥페이크 탐지 앙상블
 
+**Primary (GenD-PE 사용 가능 시)**
+
 | 모델 | 가중치 | 역할 |
 |------|--------|------|
-| EfficientViT | 40% | 딥페이크 탐지 + 히트맵 생성 + 마커 |
-| UnivFD | 30% | 범용 가짜 이미지 탐지 |
-| Sightengine (deepfake) | 15% | 얼굴 조작 탐지 |
-| Sightengine (genai) | 15% | AI 생성 이미지 탐지 |
+| GenD-PE (`yermandy/GenD_PE_L`) | 55% | 딥페이크 탐지 + 히트맵 + 6종 알고리즘 검사 |
+| Sightengine (deepfake) | 25% | 얼굴 조작 탐지 |
+| Sightengine (genai) | 20% | AI 생성 이미지 탐지 |
+
+**Fallback (GenD-PE 미사용 시)**
+
+| 모델 | 가중치 | 역할 |
+|------|--------|------|
+| SigLIP-L/14 (`google/siglip-large-patch16-384`) | 35% | Zero-shot AI 생성 이미지 탐지 |
+| Sightengine (deepfake) | 35% | 얼굴 조작 탐지 |
+| Sightengine (genai) | 30% | AI 생성 이미지 탐지 |
 
 ### 비디오 딥페이크 탐지 앙상블
 
 | 모델 | 가중치 | 역할 |
 |------|--------|------|
-| Cross-EfficientViT | 65% | 비디오 딥페이크 (DFDC AUC 0.951) |
-| Sightengine | 35% | 비디오 딥페이크 탐지 |
+| GenConViT-ED (`Deressa/GenConViT`) | 70% | 비디오 딥페이크 (DFDC+FF+++CelebDF+TIMIT AUC 0.993) |
+| Sightengine | 30% | 비디오 딥페이크 탐지 |
 
 ### 알고리즘 체크 항목
 
@@ -115,13 +124,11 @@ AI 기반 로맨스 스캠 종합 예방 플랫폼 백엔드 API 서버
 ```bash
 # uv 사용 (권장)
 uv sync
-uv pip install git+https://github.com/openai/CLIP.git
 
 # 또는 pip 사용
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-pip install git+https://github.com/openai/CLIP.git
 ```
 
 ### 2. 환경 변수 설정
@@ -160,18 +167,13 @@ CYBERCOP_URL=your_url
 GOOGLE_SAFE_BROWSING_KEY=your_key
 ```
 
-### 3. 모델 가중치 다운로드 (선택)
+### 3. 모델 가중치 (자동 다운로드)
+
+GenD-PE, SigLIP, GenConViT 모델 가중치는 서버 첫 실행 시 HuggingFace에서 자동 다운로드됩니다.
 
 ```bash
-# CLIP 모델 (자동 다운로드, SSL 에러 시 수동)
-mkdir -p ~/.cache/clip
-curl -L -k -o ~/.cache/clip/ViT-B-32.pt \
-  "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt"
-
-# Cross-EfficientViT 모델 (Google Drive에서 다운로드)
-# https://drive.google.com/drive/folders/19bNOs8_rZ7LmPP3boDS3XvZcR1iryHR1
-mkdir -p src/infrastructure/ai/deepfake_explainer/models
-mv ~/Downloads/cross_efficient_vit.pth src/infrastructure/ai/deepfake_explainer/models/
+# 사전 다운로드 (선택)
+python -c "from huggingface_hub import hf_hub_download; hf_hub_download('Deressa/GenConViT', 'genconvit_ed_inference.pth')"
 ```
 
 ## 실행 방법
@@ -298,7 +300,7 @@ src/
 │   ├── training/         # 면역 훈련 (LangGraph)
 │   └── report/           # 신고 가이드 생성
 ├── infrastructure/       # 외부 서비스 연동
-│   ├── ai/               # EfficientViT, CLIP, DeepFace, MediaPipe
+│   ├── ai/               # GenD-PE, GenConViT, SigLIP, DeepFace, MediaPipe
 │   ├── external/         # Sightengine, OpenAI, 경찰청, 사이버캅
 │   └── persistence/      # Qdrant, Neo4j
 ├── interfaces/api/       # FastAPI 라우터

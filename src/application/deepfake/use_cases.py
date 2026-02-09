@@ -12,7 +12,7 @@ from src.infrastructure.ai.deepfake_explainer import get_deepfake_explainer_serv
 from src.infrastructure.external import SightengineService
 from src.shared.exceptions import ValidationException
 
-# SigLIP, Cross-EfficientViT 디텍터
+# SigLIP, GenConViT 디텍터
 def get_clip_detector_safe():
     """SigLIP 디텍터 안전하게 가져오기"""
     try:
@@ -22,13 +22,13 @@ def get_clip_detector_safe():
         logger.warning(f"SigLIP detector not available: {e}")
         return None
 
-def get_cross_evit_detector_safe():
-    """Cross-EfficientViT 디텍터 안전하게 가져오기"""
+def get_genconvit_detector_safe():
+    """GenConViT 디텍터 안전하게 가져오기"""
     try:
-        from src.infrastructure.ai.cross_efficient_vit import get_cross_evit_detector
-        return get_cross_evit_detector()
+        from src.infrastructure.ai.genconvit_detector import get_genconvit_detector
+        return get_genconvit_detector()
     except Exception as e:
-        logger.warning(f"Cross-EfficientViT detector not available: {e}")
+        logger.warning(f"GenConViT detector not available: {e}")
         return None
 
 logger = logging.getLogger(__name__)
@@ -599,36 +599,36 @@ class AnalyzeImageUseCase:
 
 
 class AnalyzeVideoUseCase:
-    """비디오 딥페이크 분석 유스케이스 (Cross-EfficientViT + Sightengine 앙상블)"""
+    """비디오 딥페이크 분석 유스케이스 (GenConViT + Sightengine 앙상블)"""
 
     def __init__(self, sightengine: SightengineService):
         self.sightengine = sightengine
 
     async def execute(self, video_data: bytes) -> DeepfakeAnalysisResult:
-        """비디오 분석 실행 (Cross-EfficientViT + Sightengine 앙상블)"""
+        """비디오 분석 실행 (GenConViT + Sightengine 앙상블)"""
         if not video_data:
             raise ValidationException("비디오 데이터가 필요합니다")
 
-        # 병렬 분석: Cross-EfficientViT + Sightengine
-        cross_evit_result, sightengine_result = await asyncio.gather(
-            self._run_cross_evit(video_data),
+        # 병렬 분석: GenConViT + Sightengine
+        genconvit_result, sightengine_result = await asyncio.gather(
+            self._run_genconvit(video_data),
             self._run_sightengine_video(video_data),
         )
 
-        cross_evit_confidence = cross_evit_result.confidence if cross_evit_result else 0
+        genconvit_confidence = genconvit_result.confidence if genconvit_result else 0
         sightengine_confidence = sightengine_result.confidence if sightengine_result else 0
 
-        # 가중 앙상블: Cross-EfficientViT 65%, Sightengine 35% (응답한 엔진만 참여)
+        # 가중 앙상블: GenConViT 70%, Sightengine 30% (응답한 엔진만 참여)
         candidates = [
-            (cross_evit_confidence, 0.65),
-            (sightengine_confidence, 0.35),
+            (genconvit_confidence, 0.70),
+            (sightengine_confidence, 0.30),
         ]
         weighted_sum = sum(s * w for s, w in candidates if s > 0)
         total_weight = sum(w for s, w in candidates if s > 0)
         confidence = weighted_sum / total_weight if total_weight > 0 else 0
 
         # 둘 다 실패하면 시뮬레이션 결과
-        if confidence == 0 and not cross_evit_result and not sightengine_result:
+        if confidence == 0 and not genconvit_result and not sightengine_result:
             return self._simulate_result()
 
         is_deepfake = confidence >= 50
@@ -646,7 +646,7 @@ class AnalyzeVideoUseCase:
         else:
             message = f"딥페이크 가능성 낮음 ({100 - confidence:.1f}% 신뢰도)"
 
-        logger.info(f"Video Ensemble: CrossEViT={cross_evit_confidence:.1f}%, Sightengine={sightengine_confidence:.1f}% -> Final={confidence:.1f}%")
+        logger.info(f"Video Ensemble: GenConViT={genconvit_confidence:.1f}%, Sightengine={sightengine_confidence:.1f}% -> Final={confidence:.1f}%")
 
         return DeepfakeAnalysisResult(
             is_deepfake=is_deepfake,
@@ -655,26 +655,26 @@ class AnalyzeVideoUseCase:
             media_type="video",
             message=message,
             details={
-                "cross_efficientvit": cross_evit_confidence,
+                "genconvit": genconvit_confidence,
                 "sightengine": sightengine_confidence,
-                "analyzed_frames": cross_evit_result.analyzed_frames if cross_evit_result else 0,
-                "frame_scores": cross_evit_result.frame_scores if cross_evit_result else [],
-                "model": "Cross-EfficientViT + Sightengine Ensemble",
+                "analyzed_frames": genconvit_result.analyzed_frames if genconvit_result else 0,
+                "frame_scores": genconvit_result.frame_scores if genconvit_result else [],
+                "model": "GenConViT + Sightengine Ensemble",
             }
         )
 
-    async def _run_cross_evit(self, video_data: bytes):
-        """Cross-EfficientViT 비동기 분석 (sync → async 변환)"""
-        detector = get_cross_evit_detector_safe()
+    async def _run_genconvit(self, video_data: bytes):
+        """GenConViT 비동기 분석 (sync → async 변환)"""
+        detector = get_genconvit_detector_safe()
         if not detector or not detector.is_available():
             return None
         try:
-            logger.info("Using Cross-EfficientViT for video deepfake detection")
+            logger.info("Using GenConViT for video deepfake detection")
             result = await asyncio.to_thread(detector.analyze_video, video_data)
-            logger.info(f"Cross-EfficientViT result: {result.confidence:.1f}%")
+            logger.info(f"GenConViT result: {result.confidence:.1f}%")
             return result
         except Exception as e:
-            logger.warning(f"Cross-EfficientViT failed: {e}")
+            logger.warning(f"GenConViT failed: {e}")
             return None
 
     async def _run_sightengine_video(self, video_data: bytes):
