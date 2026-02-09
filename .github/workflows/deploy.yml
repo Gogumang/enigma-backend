@@ -55,9 +55,13 @@ jobs:
         run: |
           IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-          docker build -t $IMAGE_URI -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-          docker push $IMAGE_URI
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker buildx build \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --push \
+            -t $IMAGE_URI \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
 
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
@@ -100,6 +104,7 @@ jobs:
           POLICE_FRAUD_KEY=${{ secrets.POLICE_FRAUD_KEY }}
           CYBERCOP_URL=${{ secrets.CYBERCOP_URL }}
           GOOGLE_SAFE_BROWSING_KEY=${{ secrets.GOOGLE_SAFE_BROWSING_KEY }}
+          HF_TOKEN=${{ secrets.HF_TOKEN }}
           EOF
 
       - name: Copy files to EC2
@@ -125,6 +130,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           envs: ECR_REGISTRY,ECR_REPOSITORY,IMAGE_URI,AWS_REGION,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY
+          command_timeout: 15m
           script: |
             set -e
             cd /home/ubuntu/app
@@ -147,10 +153,13 @@ jobs:
             echo "=== ECR Login ==="
             aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
 
-            # 이전 이미지/캐시 정리 (디스크 확보)
-            echo "=== Cleaning up old Docker resources ==="
+            # 이전 컨테이너 중지 (볼륨은 유지)
+            echo "=== Stopping old containers ==="
             docker compose -f docker-compose.prod.yml -f docker-compose.override.yml down --remove-orphans 2>/dev/null || true
-            docker system prune -af --volumes 2>/dev/null || true
+
+            # 오래된 이미지만 정리 (볼륨 보존 — HF 모델 캐시 유지)
+            echo "=== Cleaning up old Docker images ==="
+            docker image prune -af 2>/dev/null || true
             echo "=== Disk usage after cleanup ==="
             df -h /
 
@@ -184,9 +193,9 @@ jobs:
             echo "=== App container logs ==="
             docker logs enigma-app --tail 100 || echo "No app logs yet"
 
-            # Wait for health check
+            # Wait for health check (첫 배포 시 HF 모델 다운로드로 최대 5분 소요)
             echo "=== Waiting for application to be healthy ==="
-            for i in {1..30}; do
+            for i in {1..60}; do
               if curl -sf http://localhost:4000/api/health > /dev/null 2>&1; then
                 echo "App is healthy on port 4000!"
                 break
@@ -195,9 +204,14 @@ jobs:
                 echo "App is healthy via nginx!"
                 break
               fi
-              echo "Attempt $i/30: Waiting..."
-              docker ps -a
-              sleep 10
+              if [ $i -eq 60 ]; then
+                echo "Health check timed out after 60 attempts"
+                echo "=== App Logs ==="
+                docker logs enigma-app --tail 200 || true
+                exit 1
+              fi
+              echo "Attempt $i/60: Waiting..."
+              sleep 5
             done
 
             # Final status
@@ -221,6 +235,9 @@ jobs:
           script: |
             echo "=== Container Status ==="
             docker ps -a
+
+            echo "=== HF Cache Status ==="
+            docker exec enigma-app du -sh /app/.cache/huggingface 2>/dev/null || echo "Cache not accessible"
 
             echo "=== Health Check ==="
             response=$(curl -sf http://localhost/api/health 2>&1) && {

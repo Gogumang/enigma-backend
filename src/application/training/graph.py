@@ -169,6 +169,10 @@ def analyze_user_reaction(state: TrainingState) -> dict:
         score = max(0, score - 25)
     elif reaction == UserReaction.RESISTANT:
         score = min(100, score + 5)
+    elif reaction == UserReaction.POSITIVE:
+        score = max(0, score - 10)
+    elif reaction == UserReaction.NEUTRAL:
+        score = max(0, score - 5)
 
     return {
         "user_reaction": reaction,
@@ -184,8 +188,8 @@ def determine_next_stage(state: TrainingState) -> dict:
 
     next_stage = current
 
-    # 최대 턴 초과 시 자동 종료
-    if turn >= MAX_TURNS:
+    # 최대 턴 도달 시 자동 종료 (turn_count는 respond에서 +1되므로 -1 보정)
+    if turn >= MAX_TURNS - 1:
         if state["user_score"] >= 70:
             return {"current_stage": ScamStage.GIVE_UP}
         else:
@@ -723,7 +727,7 @@ class ScamSimulationGraph:
             current_stage=ScamStage.GREETING,
             turn_count=0,
             user_reaction=UserReaction.NEUTRAL,
-            user_score=100,
+            user_score=50,
             tactics_used=[],
             last_scammer_message=opening,
             last_image_url=None,

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ============================================
 # Stage 1: Builder
 # ============================================
@@ -5,7 +6,6 @@ FROM python:3.11-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,12 +16,12 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 
 # Create venv and install dependencies (CPU-only PyTorch for smaller image)
-RUN python -m venv /app/.venv && \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m venv /app/.venv && \
     . /app/.venv/bin/activate && \
-    pip install --no-cache-dir --upgrade pip "setuptools<81" wheel && \
-    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir . && \
-    PIP_CONSTRAINT=/dev/null pip install --no-cache-dir --no-build-isolation git+https://github.com/openai/CLIP.git
+    pip install --upgrade pip "setuptools<81" wheel && \
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    pip install .
 
 # Clean up Python cache
 RUN find /app/.venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
@@ -57,6 +57,10 @@ COPY --chown=appuser:appuser assets ./assets
 # Create data directory for scammer repository
 RUN mkdir -p /app/data && chown appuser:appuser /app/data
 
+# Create HuggingFace cache directory
+ENV HF_HOME=/app/.cache/huggingface
+RUN mkdir -p /app/.cache/huggingface && chown appuser:appuser /app/.cache/huggingface
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -70,8 +74,8 @@ USER appuser
 # Expose port
 EXPOSE 4000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=180s --retries=5 \
+# Health check (start-period 확장: HF 모델 첫 다운로드 시 시간 필요)
+HEALTHCHECK --interval=30s --timeout=30s --start-period=300s --retries=5 \
     CMD curl -f http://localhost:4000/api/health || exit 1
 
 # Run the application

@@ -140,16 +140,7 @@ async def initialize_services():
 
 
 async def _preload_ai_models(logger):
-    """UnivFD + EfficientViT 모델을 병렬로 미리 로드"""
-
-    async def _load_univfd():
-        try:
-            from src.infrastructure.ai.univfd_detector import get_univfd_detector
-            detector = get_univfd_detector()
-            await asyncio.to_thread(detector._ensure_initialized)
-            logger.info("UnivFD 모델 프리로드 완료")
-        except Exception as e:
-            logger.warning(f"UnivFD 프리로드 실패 (폴백 사용): {e}")
+    """GenD-PE 모델을 미리 로드"""
 
     async def _load_explainer():
         try:
@@ -157,8 +148,8 @@ async def _preload_ai_models(logger):
             explainer = get_deepfake_explainer_service()
             if explainer.is_available():
                 await asyncio.to_thread(explainer._ensure_initialized)
-                logger.info("EfficientViT 모델 프리로드 완료")
+                logger.info("GenD-PE 모델 프리로드 완료")
         except Exception as e:
-            logger.warning(f"EfficientViT 프리로드 실패 (폴백 사용): {e}")
+            logger.warning(f"GenD-PE 프리로드 실패 (폴백 사용): {e}")
 
-    await asyncio.gather(_load_univfd(), _load_explainer())
+    await _load_explainer()

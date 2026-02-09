@@ -10,10 +10,12 @@ services:
     environment:
       - ENV=production
       - PORT=4000
+      - HF_HOME=/app/.cache/huggingface
     ports:
       - "4000:4000"
     volumes:
       - app-models:/app/models
+      - hf-cache:/app/.cache/huggingface
     networks:
       - enigma-network
     healthcheck:
@@ -21,7 +23,7 @@ services:
       interval: 30s
       timeout: 30s
       retries: 5
-      start_period: 180s
+      start_period: 300s
 
   nginx:
     image: nginx:alpine
@@ -47,6 +49,7 @@ services:
 
 volumes:
   app-models:
+  hf-cache:
 
 networks:
   enigma-network:

@@ -28,11 +28,80 @@ class ImageQualityResult:
 
 
 class ImageQualityService:
-    """이미지 품질 분석 서비스 (Blur Detection)"""
+    """이미지 품질 분석 서비스 (Blur Detection + Real-ESRGAN SR)"""
 
     # Blur score 임계값
     HIGH_QUALITY_THRESHOLD = 50.0
     MEDIUM_QUALITY_THRESHOLD = 25.0
+
+    def __init__(self):
+        self._sr_model = None
+
+    def _load_sr_model(self):
+        """Real-ESRGAN 모델 lazy loading"""
+        if self._sr_model is not None:
+            return self._sr_model
+        try:
+            from realesrgan import RealESRGANer
+            from basicsr.archs.rrdbnet_arch import RRDBNet
+            import torch
+
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self._sr_model = RealESRGANer(
+                scale=4,
+                model_path="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+                model=model,
+                device=device,
+                half=False,
+            )
+            logger.info("Real-ESRGAN SR model loaded successfully")
+        except Exception as e:
+            logger.warning(f"Real-ESRGAN SR model load failed: {e}")
+            self._sr_model = None
+        return self._sr_model
+
+    def enhance(self, image_data: bytes) -> tuple[bytes, bool]:
+        """
+        저화질 이미지에 Real-ESRGAN x4 적용
+
+        Returns:
+            (enhanced_image_bytes, was_enhanced)
+        """
+        quality = self.analyze(image_data)
+        if quality.quality_level != ImageQualityLevel.LOW:
+            return image_data, False
+
+        try:
+            sr_model = self._load_sr_model()
+            if sr_model is None:
+                return image_data, False
+
+            image = Image.open(io.BytesIO(image_data))
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            img_array = np.array(image)
+
+            # BGR 변환 (Real-ESRGAN은 OpenCV BGR 입력)
+            import cv2
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            output, _ = sr_model.enhance(img_bgr, outscale=4)
+            output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
+
+            # bytes로 변환
+            enhanced_image = Image.fromarray(output_rgb)
+            buf = io.BytesIO()
+            enhanced_image.save(buf, format="JPEG", quality=95)
+            enhanced_bytes = buf.getvalue()
+
+            logger.info(
+                f"Real-ESRGAN SR applied: blur_score {quality.blur_score:.1f} -> enhanced"
+            )
+            return enhanced_bytes, True
+
+        except Exception as e:
+            logger.warning(f"Real-ESRGAN SR enhancement failed, using original: {e}")
+            return image_data, False
 
     def analyze(self, image_data: bytes) -> ImageQualityResult:
         """

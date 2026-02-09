@@ -12,23 +12,14 @@ from src.infrastructure.ai.deepfake_explainer import get_deepfake_explainer_serv
 from src.infrastructure.external import SightengineService
 from src.shared.exceptions import ValidationException
 
-# UnivFD, CLIP, Cross-EfficientViT 디텍터
-def get_univfd_detector_safe():
-    """UnivFD 디텍터 안전하게 가져오기"""
-    try:
-        from src.infrastructure.ai.univfd_detector import get_univfd_detector
-        return get_univfd_detector()
-    except Exception as e:
-        logger.warning(f"UnivFD detector not available: {e}")
-        return None
-
+# SigLIP, Cross-EfficientViT 디텍터
 def get_clip_detector_safe():
-    """CLIP 디텍터 안전하게 가져오기"""
+    """SigLIP 디텍터 안전하게 가져오기"""
     try:
         from src.infrastructure.ai.clip_detector import get_clip_detector
         return get_clip_detector()
     except Exception as e:
-        logger.warning(f"CLIP detector not available: {e}")
+        logger.warning(f"SigLIP detector not available: {e}")
         return None
 
 def get_cross_evit_detector_safe():
@@ -112,11 +103,13 @@ class AnalyzeImageUseCase:
         # 0. GIF/PNG/WebP 등을 JPEG로 변환
         image_data = convert_to_jpeg(image_data)
 
-        # 1. 병렬 분석: 품질 체크 + Sightengine + UnivFD + CLIP + EfficientViT
-        quality_result, sightengine_result, univfd_result, clip_result, explainer_result = await asyncio.gather(
+        # 0.5 SR 전처리: 저화질 이미지 Real-ESRGAN 향상
+        image_data, was_enhanced = _image_quality_service.enhance(image_data)
+
+        # 1. 병렬 분석: 품질 체크 + Sightengine + SigLIP + GenD-PE
+        quality_result, sightengine_result, clip_result, explainer_result = await asyncio.gather(
             asyncio.to_thread(_image_quality_service.analyze, image_data),
             self._run_sightengine(image_data),
-            self._run_univfd(image_data),
             self._run_clip(image_data),
             self._run_explainer(image_data),
         )
@@ -127,20 +120,18 @@ class AnalyzeImageUseCase:
             sightengine_confidence = sightengine_result.confidence
             sightengine_genai_score = sightengine_result.details.get("genai_score", 0)
 
-        univfd_confidence = univfd_result.fake_score if univfd_result else 0
-
-        # 3. 앙상블: Sightengine + EfficientViT + UnivFD 가중 평균
+        # 3. 앙상블: Sightengine + GenD-PE 가중 평균
         if explainer_result:
-            # EfficientViT 결과
-            evit_confidence = explainer_result.confidence
+            # GenD-PE 결과
+            gend_confidence = explainer_result.confidence
 
             # 가중 평균 앙상블 (응답한 모델만 참여)
             confidence = self._weighted_ensemble(
-                evit_confidence, sightengine_confidence, sightengine_genai_score, univfd_confidence
+                gend_confidence, sightengine_confidence, sightengine_genai_score
             )
             is_deepfake = confidence >= 50
 
-            logger.info(f"Ensemble: EViT={evit_confidence:.1f}%, Sightengine={sightengine_confidence:.1f}%, GenAI={sightengine_genai_score:.1f}%, UnivFD={univfd_confidence:.1f}% -> Final={confidence:.1f}%")
+            logger.info(f"Ensemble: GenD-PE={gend_confidence:.1f}%, Sightengine={sightengine_confidence:.1f}%, GenAI={sightengine_genai_score:.1f}% -> Final={confidence:.1f}%")
 
             # 마커 변환 (DetectionMarker -> dict)
             markers = [
@@ -216,8 +207,7 @@ class AnalyzeImageUseCase:
                 risk_level = "low"
 
             # AI 생성 이미지인 경우 메시지 다르게
-            ai_gen_score = max(sightengine_genai_score, univfd_confidence)
-            if ai_gen_score >= 50 and ai_gen_score >= evit_confidence:
+            if sightengine_genai_score >= 50 and sightengine_genai_score >= gend_confidence:
                 message = f"AI 생성 이미지 의심 ({confidence:.1f}%)"
             else:
                 message = f"딥페이크 {'의심' if is_deepfake else '가능성 낮음'} ({confidence:.1f}%)"
@@ -230,12 +220,11 @@ class AnalyzeImageUseCase:
                 message=message,
                 details={
                     "heatmap_base64": explainer_result.heatmap_base64,
-                    "model_confidence": ensemble_details.get("model_confidence", evit_confidence),
+                    "model_confidence": ensemble_details.get("model_confidence", gend_confidence),
                     "algorithm_score": ensemble_details.get("algorithm_score", 0),
                     "sightengine_deepfake": sightengine_confidence,
                     "sightengine_genai": sightengine_genai_score,
-                    "efficientvit": evit_confidence,
-                    "univfd": univfd_confidence,
+                    "gend_pe": gend_confidence,
                 },
                 markers=markers,
                 overall_assessment=overall_assessment,
@@ -244,14 +233,13 @@ class AnalyzeImageUseCase:
                 ensemble_details=ensemble_details,
             )
 
-        # 4. Sightengine + UnivFD/CLIP 경로 (EfficientViT 사용 불가 시)
-        elif sightengine_result or univfd_result or clip_result:
+        # 4. SigLIP + Sightengine 경로 (GenD-PE 사용 불가 시)
+        elif sightengine_result or clip_result:
             # 사용 가능한 모델들로 앙상블 구성
             clip_confidence = clip_result.fake_score if clip_result else 0
 
             confidence = self._fallback_ensemble(
-                sightengine_confidence, sightengine_genai_score,
-                univfd_confidence, clip_confidence,
+                sightengine_confidence, sightengine_genai_score, clip_confidence,
             )
             is_deepfake = confidence >= 50
 
@@ -266,8 +254,8 @@ class AnalyzeImageUseCase:
 
             logger.info(
                 f"Fallback Ensemble: Sightengine={sightengine_confidence:.1f}%, "
-                f"GenAI={sightengine_genai_score:.1f}%, UnivFD={univfd_confidence:.1f}%, "
-                f"CLIP={clip_confidence:.1f}% -> Final={confidence:.1f}%"
+                f"GenAI={sightengine_genai_score:.1f}%, "
+                f"SigLIP={clip_confidence:.1f}% -> Final={confidence:.1f}%"
             )
 
             result = DeepfakeAnalysisResult(
@@ -279,9 +267,8 @@ class AnalyzeImageUseCase:
                 details={
                     "sightengine_deepfake": sightengine_confidence,
                     "sightengine_genai": sightengine_genai_score,
-                    "univfd": univfd_confidence,
-                    "clip": clip_confidence,
-                    "model": "UnivFD+CLIP Fallback Ensemble",
+                    "siglip": clip_confidence,
+                    "model": "SigLIP+Sightengine Fallback Ensemble",
                 },
             )
 
@@ -340,41 +327,27 @@ class AnalyzeImageUseCase:
             logger.warning(f"Sightengine API failed: {e}")
             return None
 
-    async def _run_univfd(self, image_data: bytes):
-        """UnivFD 분석 (sync → async 변환)"""
-        detector = get_univfd_detector_safe()
-        if not detector or not detector.is_available():
-            return None
-        try:
-            logger.info("Using UnivFD for AI-generated image detection")
-            result = await asyncio.to_thread(detector.analyze, image_data)
-            logger.info(f"UnivFD result: fake_score={result.fake_score:.1f}%")
-            return result
-        except Exception as e:
-            logger.warning(f"UnivFD detector failed: {e}")
-            return None
-
     async def _run_clip(self, image_data: bytes):
-        """CLIP 디텍터 분석 (sync → async 변환)"""
+        """SigLIP 디텍터 분석 (sync → async 변환)"""
         detector = get_clip_detector_safe()
         if not detector or not detector.is_available():
             return None
         try:
-            logger.info("Using CLIP for AI-generated image detection")
+            logger.info("Using SigLIP for AI-generated image detection")
             result = await asyncio.to_thread(detector.analyze, image_data)
-            logger.info(f"CLIP result: fake_score={result.fake_score:.1f}%")
+            logger.info(f"SigLIP result: fake_score={result.fake_score:.1f}%")
             return result
         except Exception as e:
-            logger.warning(f"CLIP detector failed: {e}")
+            logger.warning(f"SigLIP detector failed: {e}")
             return None
 
     async def _run_explainer(self, image_data: bytes):
-        """EfficientViT DeepfakeExplainer 분석 (sync → async 변환)"""
+        """GenD-PE DeepfakeExplainer 분석 (sync → async 변환)"""
         try:
             explainer = get_deepfake_explainer_service()
             if not explainer.is_available():
                 return None
-            logger.info("Using EfficientViT DeepfakeExplainer for analysis")
+            logger.info("Using GenD-PE DeepfakeExplainer for analysis")
             return await asyncio.to_thread(explainer.analyze, image_data)
         except Exception as e:
             logger.warning(f"DeepfakeExplainer failed, falling back: {e}")
@@ -382,15 +355,15 @@ class AnalyzeImageUseCase:
 
     @staticmethod
     def _weighted_ensemble(
-        evit: float, sightengine: float, genai: float, univfd: float
+        gend: float, sightengine: float, genai: float
     ) -> float:
-        """가중 평균 앙상블 — 응답한 모델만 참여, 0은 미응답으로 간주"""
-        # (score, weight) — EfficientViT 가장 신뢰, UnivFD 다음, Sightengine 보조
+        """가중 평균 앙상블 — 응답한 모델만 참여, 0은 미응답으로 간주
+        Primary: GenD-PE(55%) + Sightengine(25%) + GenAI(20%)
+        """
         candidates = [
-            (evit, 0.40),
-            (univfd, 0.30),
-            (sightengine, 0.15),
-            (genai, 0.15),
+            (gend, 0.55),
+            (sightengine, 0.25),
+            (genai, 0.20),
         ]
         total_weight = 0.0
         weighted_sum = 0.0
@@ -404,15 +377,15 @@ class AnalyzeImageUseCase:
 
     @staticmethod
     def _fallback_ensemble(
-        sightengine: float, genai: float, univfd: float, clip: float
+        sightengine: float, genai: float, siglip: float
     ) -> float:
-        """EfficientViT 없이 사용 가능한 모델만으로 앙상블"""
-        # UnivFD(0.40) + CLIP(0.25) + Sightengine deepfake(0.20) + Sightengine genai(0.15)
+        """GenD-PE 없이 사용 가능한 모델만으로 앙상블
+        Fallback: SigLIP(35%) + Sightengine(35%) + GenAI(30%)
+        """
         candidates = [
-            (univfd, 0.40),
-            (clip, 0.25),
-            (sightengine, 0.20),
-            (genai, 0.15),
+            (siglip, 0.35),
+            (sightengine, 0.35),
+            (genai, 0.30),
         ]
         total_weight = 0.0
         weighted_sum = 0.0

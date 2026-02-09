@@ -1,29 +1,22 @@
 """
 Explainable Deepfake Detection Service
-EfficientViT + Attention Heatmap + Multi-Algorithm Analysis
+GenD-PE (WACV 2026) + Attention Heatmap + Multi-Algorithm Analysis
 """
 import io
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
-import yaml
-from albumentations import Compose, PadIfNeeded
 from PIL import Image
 from scipy.ndimage import maximum_filter
-from torch.nn import AvgPool2d
-
-from .transforms import IsotropicResize
 
 logger = logging.getLogger(__name__)
 
 # 모델 파일 경로
 MODEL_DIR = Path(__file__).parent / "models"
-CONFIG_PATH = Path(__file__).parent / "explained_architecture.yaml"
 
 
 @dataclass
@@ -58,21 +51,6 @@ class ExplainerResult:
     raw_heatmap: np.ndarray | None = None  # 히트맵 배열
     algorithm_checks: list[AlgorithmCheck] = field(default_factory=list)  # 알고리즘 검사 결과
     ensemble_details: dict = field(default_factory=dict)  # 앙상블 상세 정보
-
-
-def avg_heads(cam, grad):
-    """Rule 5: Average attention heads"""
-    cam = cam.reshape(-1, cam.shape[-2], cam.shape[-1])
-    grad = grad.reshape(-1, grad.shape[-2], grad.shape[-1])
-    cam = grad * cam
-    cam = cam.clamp(min=0).mean(dim=0)
-    return cam
-
-
-def apply_self_attention_rules(R_ss, cam_ss):
-    """Rule 6: Apply self-attention rules"""
-    R_ss_addition = torch.matmul(cam_ss, R_ss)
-    return R_ss_addition
 
 
 # ==================== 알고리즘 기반 딥페이크 탐지 함수들 ====================
@@ -516,7 +494,7 @@ def calculate_ensemble_score(
     모델 결과와 알고리즘 검사 결과를 결합
     """
     # 모델 가중치
-    model_weight = 2.0  # EfficientViT 모델에 높은 가중치
+    model_weight = 2.0  # GenD-PE 모델에 높은 가중치
 
     # 알고리즘 가중치 합
     total_algo_weight = sum(c.weight for c in algorithm_checks if c.weight > 0)
@@ -560,14 +538,12 @@ def calculate_ensemble_score(
 
 
 class DeepfakeExplainerService:
-    """딥페이크 탐지 및 히트맵 생성 서비스"""
+    """딥페이크 탐지 및 히트맵 생성 서비스 (GenD-PE)"""
 
     def __init__(self):
         self._model = None
-        self._config = None
         self._device = None
         self._initialized = False
-        self._down_sample = None
 
     def _ensure_initialized(self):
         """모델 초기화 (지연 로딩)"""
@@ -575,98 +551,139 @@ class DeepfakeExplainerService:
             return
 
         try:
+            from transformers import AutoModel
+
             # GPU/CPU 설정
             self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             logger.info(f"Using device: {self._device}")
 
-            # Config 로드
-            with open(CONFIG_PATH, 'r') as f:
-                self._config = yaml.safe_load(f)
-
-            # 모델 로드
-            model_path = MODEL_DIR / "efficientnetB0_checkpoint89_All"
-
-            if not model_path.exists():
-                logger.warning(f"Model file not found: {model_path}")
-                logger.warning("Download from: https://drive.google.com/drive/folders/1-JtWGMyd7YaTa56R6uYpjvwmUyW5q-zN")
-                raise FileNotFoundError(f"Model not found: {model_path}")
-
-            from .evit_model import EfficientViT
-
-            self._model = EfficientViT(
-                config=self._config,
-                channels=1280,
-                selected_efficient_net=0
+            # GenD-PE 모델 로드
+            self._model = AutoModel.from_pretrained(
+                "yermandy/GenD_PE_L", trust_remote_code=True
             )
-            self._model.load_state_dict(torch.load(model_path, map_location=self._device))
-            self._model.eval()
-            self._model = self._model.to(self._device)
+            self._model.eval().to(self._device)
 
-            self._down_sample = AvgPool2d(kernel_size=2)
             self._initialized = True
-            logger.info("DeepfakeExplainerService initialized successfully")
+            logger.info("DeepfakeExplainerService (GenD-PE) initialized successfully")
 
         except Exception as e:
             logger.error(f"Failed to initialize DeepfakeExplainerService: {e}")
             raise
 
-    def _create_transform(self, size: int):
-        """이미지 전처리 transform 생성"""
-        return Compose([
-            IsotropicResize(
-                max_side=size,
-                interpolation_down=cv2.INTER_AREA,
-                interpolation_up=cv2.INTER_CUBIC
-            ),
-            PadIfNeeded(
-                min_height=size,
-                min_width=size,
-                border_mode=cv2.BORDER_CONSTANT
-            ),
-        ])
+    def _generate_attention_heatmap(self, image: Image.Image) -> np.ndarray | None:
+        """
+        Attention Rollout 기반 히트맵 생성
+        EVA ViT backbone의 attention weights를 활용
+        """
+        try:
+            # attention weights 수집을 위한 hook 등록
+            attention_maps = []
 
-    def _generate_relevance(self, input_tensor):
-        """Attention relevance map 생성"""
-        output = self._model(input_tensor, register_hook=True)
-        self._model.zero_grad()
-        output.backward(retain_graph=True)
+            def hook_fn(module, input, output):
+                # ViT의 attention layer에서 attention weights 추출
+                if hasattr(output, 'attn_weights') and output.attn_weights is not None:
+                    attention_maps.append(output.attn_weights.detach().cpu())
 
-        num_tokens = self._model.transformer.blocks[0].attn.get_attention_map().shape[-1]
-        R = torch.eye(num_tokens, num_tokens, device=self._device)
+            hooks = []
+            # EVA ViT backbone의 attention layer에 hook 등록
+            backbone = None
+            if hasattr(self._model, 'backbone'):
+                backbone = self._model.backbone
+            elif hasattr(self._model, 'model'):
+                backbone = self._model.model
+            elif hasattr(self._model, 'encoder'):
+                backbone = self._model.encoder
 
-        for blk in self._model.transformer.blocks:
-            grad = blk.attn.get_attn_gradients()
-            cam = blk.attn.get_attention_map()
-            cam = avg_heads(cam, grad)
-            R += apply_self_attention_rules(R, cam.to(self._device))
+            if backbone is not None:
+                for name, module in backbone.named_modules():
+                    if 'attn' in name.lower() and hasattr(module, 'forward'):
+                        # attention dropout이나 softmax 뒤에 hook
+                        if 'drop' in name.lower() or name.endswith('attn'):
+                            hooks.append(module.register_forward_hook(hook_fn))
 
-        return R[0, 1:]
+            # 추론 실행 (hook으로 attention 수집)
+            preprocessed = self._model.feature_extractor.preprocess(image)
+            tensor = preprocessed.unsqueeze(0).to(self._device)
+            with torch.no_grad():
+                self._model(tensor)
 
-    def _create_heatmap(self, original_image: torch.Tensor) -> np.ndarray:
-        """히트맵 생성"""
-        transformer_attribution = self._generate_relevance(
-            original_image.unsqueeze(0).to(self._device)
-        ).detach()
+            # hook 제거
+            for h in hooks:
+                h.remove()
 
-        transformer_attribution = transformer_attribution.reshape(1, 1, 32, 32)
-        transformer_attribution = self._down_sample(transformer_attribution)
-        transformer_attribution = torch.nn.functional.interpolate(
-            transformer_attribution,
-            scale_factor=14,
-            mode='bilinear'
-        )
-        transformer_attribution = transformer_attribution.reshape(224, 224)
-        transformer_attribution = transformer_attribution.cpu().numpy()
+            if not attention_maps:
+                # hook으로 수집 실패 시, 간단한 gradient 기반 히트맵 생성
+                return self._generate_gradient_heatmap(image)
 
-        # 정규화
-        attr_min = transformer_attribution.min()
-        attr_max = transformer_attribution.max()
-        if attr_max > attr_min:
-            transformer_attribution = (transformer_attribution - attr_min) / (attr_max - attr_min)
-        else:
-            transformer_attribution = np.zeros_like(transformer_attribution)
+            # Attention Rollout
+            result = torch.eye(attention_maps[0].shape[-1])
+            for attn in attention_maps:
+                # head 평균
+                attn_mean = attn.mean(dim=1)[0]  # [seq_len, seq_len]
+                # residual 추가
+                attn_residual = 0.5 * attn_mean + 0.5 * torch.eye(attn_mean.shape[0])
+                # 정규화
+                attn_residual = attn_residual / attn_residual.sum(dim=-1, keepdim=True)
+                # 누적 곱
+                result = torch.matmul(attn_residual, result)
 
-        return transformer_attribution
+            # CLS → patch attention 추출
+            cls_attention = result[0, 1:]  # CLS 토큰에서 patch로의 attention
+
+            # grid reshape
+            num_patches = cls_attention.shape[0]
+            grid_size = int(num_patches ** 0.5)
+            if grid_size * grid_size != num_patches:
+                return self._generate_gradient_heatmap(image)
+
+            heatmap = cls_attention.reshape(grid_size, grid_size).numpy()
+
+            # 이미지 크기로 업샘플
+            heatmap = cv2.resize(heatmap, (224, 224), interpolation=cv2.INTER_LINEAR)
+
+            # 정규화
+            heatmap_min = heatmap.min()
+            heatmap_max = heatmap.max()
+            if heatmap_max > heatmap_min:
+                heatmap = (heatmap - heatmap_min) / (heatmap_max - heatmap_min)
+            else:
+                heatmap = np.zeros_like(heatmap)
+
+            return heatmap
+
+        except Exception as e:
+            logger.warning(f"Attention heatmap generation failed: {e}")
+            return self._generate_gradient_heatmap(image)
+
+    def _generate_gradient_heatmap(self, image: Image.Image) -> np.ndarray | None:
+        """Gradient 기반 간단한 히트맵 (폴백)"""
+        try:
+            img_array = np.array(image.resize((224, 224)))
+            if len(img_array.shape) == 3:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = img_array
+
+            # Laplacian + Sobel 기반 히트맵
+            laplacian = np.abs(cv2.Laplacian(gray.astype(np.float64), cv2.CV_64F))
+            sobelx = np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))
+            sobely = np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))
+
+            heatmap = (laplacian * 0.5 + sobelx * 0.25 + sobely * 0.25)
+            heatmap = cv2.GaussianBlur(heatmap, (15, 15), 0)
+
+            # 정규화
+            hm_min = heatmap.min()
+            hm_max = heatmap.max()
+            if hm_max > hm_min:
+                heatmap = (heatmap - hm_min) / (hm_max - hm_min)
+            else:
+                heatmap = np.zeros_like(heatmap)
+
+            return heatmap.astype(np.float32)
+        except Exception as e:
+            logger.warning(f"Gradient heatmap generation failed: {e}")
+            return None
 
     def _overlay_heatmap(self, image: np.ndarray, heatmap: np.ndarray) -> np.ndarray:
         """이미지에 히트맵 오버레이"""
@@ -923,7 +940,7 @@ class DeepfakeExplainerService:
     def analyze(self, image_data: bytes) -> ExplainerResult:
         """
         이미지 분석 및 히트맵 생성
-        EfficientViT 모델 + 다중 알고리즘 검사 + 앙상블 스코어링
+        GenD-PE 모델 + 다중 알고리즘 검사 + 앙상블 스코어링
         """
         self._ensure_initialized()
 
@@ -935,26 +952,19 @@ class DeepfakeExplainerService:
 
             image_array = np.array(image)
 
-            # Transform 적용
-            image_size = self._config['model']['image-size']
-            transform = self._create_transform(image_size)
-            transformed = transform(image=image_array)['image']
-
-            # Tensor 변환
-            t_image = torch.tensor(np.asarray(transformed))
-            t_image = np.transpose(t_image, (2, 0, 1)).float()
-
-            # 1. EfficientViT 모델 예측
+            # 1. GenD-PE 모델 예측
+            preprocessed = self._model.feature_extractor.preprocess(image)
+            tensor = preprocessed.unsqueeze(0).to(self._device)
             with torch.no_grad():
-                pred_score = torch.sigmoid(
-                    self._model(t_image.unsqueeze(0).to(self._device))
-                )
+                logits = self._model(tensor)
+                probs = logits.softmax(dim=-1)
+                fake_prob = probs[0, 1].item()  # class 1 = fake
 
-            model_confidence = pred_score.item() * 100
+            model_confidence = fake_prob * 100
 
             # 2. 다중 알고리즘 검사 실행
             logger.info("Running multi-algorithm deepfake checks...")
-            algorithm_checks = run_all_algorithm_checks(transformed)
+            algorithm_checks = run_all_algorithm_checks(image_array)
 
             # 3. 앙상블 스코어 계산
             ensemble_confidence, is_deepfake, ensemble_details = calculate_ensemble_score(
@@ -968,25 +978,34 @@ class DeepfakeExplainerService:
                 f"Suspicious checks: {ensemble_details['suspicious_algorithm_count']}"
             )
 
-            # 4. 히트맵 생성
-            heatmap = self._create_heatmap(t_image)
+            # 4. 히트맵 생성 (Attention Rollout)
+            try:
+                heatmap = self._generate_attention_heatmap(image)
+            except Exception as e:
+                logger.warning(f"Heatmap generation failed, using gradient fallback: {e}")
+                heatmap = self._generate_gradient_heatmap(image)
 
-            # 5. 얼굴 랜드마크 기반 동적 마커 추출
-            markers = self._extract_markers_with_landmarks(
-                image_data, heatmap, is_deepfake, algorithm_checks, top_k=3
-            )
+            heatmap_base64 = None
+            if heatmap is not None:
+                # 5. 얼굴 랜드마크 기반 동적 마커 추출
+                markers = self._extract_markers_with_landmarks(
+                    image_data, heatmap, is_deepfake, algorithm_checks, top_k=3
+                )
 
-            # 6. 히트맵 오버레이 이미지 생성
-            overlay = self._overlay_heatmap(transformed, heatmap)
+                # 6. 히트맵 오버레이 이미지 생성
+                image_resized = cv2.resize(image_array, (224, 224))
+                overlay = self._overlay_heatmap(image_resized, heatmap)
 
-            # Base64 인코딩
-            import base64
-            _, buffer = cv2.imencode('.jpg', cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-            heatmap_base64 = base64.b64encode(buffer).decode('utf-8')
+                # Base64 인코딩
+                import base64
+                _, buffer = cv2.imencode('.jpg', cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+                heatmap_base64 = base64.b64encode(buffer).decode('utf-8')
+            else:
+                markers = []
 
             return ExplainerResult(
                 is_deepfake=is_deepfake,
-                confidence=ensemble_confidence,  # 앙상블 점수 사용
+                confidence=ensemble_confidence,
                 markers=markers,
                 heatmap_base64=heatmap_base64,
                 raw_heatmap=heatmap,
@@ -1000,8 +1019,12 @@ class DeepfakeExplainerService:
 
     def is_available(self) -> bool:
         """서비스 사용 가능 여부"""
-        model_path = MODEL_DIR / "efficientnetB0_checkpoint89_All"
-        return model_path.exists()
+        try:
+            import transformers  # noqa: F401
+            import timm  # noqa: F401
+            return True
+        except ImportError:
+            return False
 
 
 # 싱글톤
