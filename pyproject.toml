@@ -24,7 +24,7 @@ dependencies = [
     "opencv-python>=4.8.0",
     "efficientnet-pytorch>=0.7.1",
     "einops>=0.7.0",
-    "real-esrgan",
+    "realesrgan",
 
     # HuggingFace / Vision models
     "transformers>=4.36.0",
