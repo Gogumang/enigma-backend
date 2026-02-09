@@ -135,25 +135,27 @@ class EnhancedImageSearchService:
 
     async def _upload_image(self, image_data: bytes) -> str | None:
         """이미지 업로드 (여러 서비스 동시 시도, 먼저 성공한 것 사용)"""
-        tasks = [
-            asyncio.create_task(self._safe_upload(self._upload_to_imgbb, image_data)),
-            asyncio.create_task(self._safe_upload(self._upload_to_catbox, image_data)),
-            asyncio.create_task(self._safe_upload(self._upload_to_litterbox, image_data)),
-        ]
+        try:
+            tasks = [
+                asyncio.create_task(self._safe_upload(self._upload_to_imgbb, image_data)),
+                asyncio.create_task(self._safe_upload(self._upload_to_catbox, image_data)),
+                asyncio.create_task(self._safe_upload(self._upload_to_litterbox, image_data)),
+            ]
 
-        # 먼저 성공한 결과 반환, 나머지 취소
-        while tasks:
-            done, tasks_set = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            tasks = list(tasks_set)
-            for task in done:
-                result = task.result()
-                if result:
-                    # 나머지 태스크 취소
-                    for t in tasks:
-                        t.cancel()
-                    return result
+            # 먼저 성공한 결과 반환, 나머지 취소
+            while tasks:
+                done, tasks_set = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                tasks = list(tasks_set)
+                for task in done:
+                    result = task.result()
+                    if result:
+                        for t in tasks:
+                            t.cancel()
+                        return result
 
-        return None
+            return None
+        except Exception:
+            return None
 
     async def _safe_upload(self, upload_fn, image_data: bytes) -> str | None:
         """업로드 함수를 안전하게 실행"""
@@ -166,7 +168,7 @@ class EnhancedImageSearchService:
     async def _upload_to_imgbb(self, image_data: bytes) -> str | None:
         """imgbb 업로드"""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(
                     "https://api.imgbb.com/1/upload",
                     data={
@@ -185,7 +187,7 @@ class EnhancedImageSearchService:
     async def _upload_to_catbox(self, image_data: bytes) -> str | None:
         """catbox 업로드"""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(
                     "https://catbox.moe/user/api.php",
                     data={"reqtype": "fileupload"},
@@ -202,7 +204,7 @@ class EnhancedImageSearchService:
     async def _upload_to_litterbox(self, image_data: bytes) -> str | None:
         """litterbox 업로드 (24시간 임시)"""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(
                     "https://litterbox.catbox.moe/resources/internals/api.php",
                     data={"reqtype": "fileupload", "time": "24h"},
@@ -225,7 +227,7 @@ class EnhancedImageSearchService:
             return results
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=20.0) as client:
                 response = await client.get(
                     "https://serpapi.com/search",
                     params={
@@ -290,7 +292,7 @@ class EnhancedImageSearchService:
             return results
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=20.0) as client:
                 response = await client.get(
                     "https://serpapi.com/search",
                     params={
@@ -330,7 +332,7 @@ class EnhancedImageSearchService:
             return results
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=20.0) as client:
                 response = await client.get(
                     "https://serpapi.com/search",
                     params={
@@ -541,7 +543,7 @@ class EnhancedImageSearchService:
         original_image: bytes,
         results: list[EnhancedSearchResult]
     ) -> list[EnhancedSearchResult]:
-        """얼굴 비교로 매치 스코어 계산 (병렬)"""
+        """얼굴 비교로 매치 스코어 계산 (병렬, 최적화)"""
         if not self.face_recognition:
             return results
 
@@ -555,18 +557,24 @@ class EnhancedImageSearchService:
                 return results
 
             original_arr = np.array(original_embedding)
-            semaphore = asyncio.Semaphore(5)
+            semaphore = asyncio.Semaphore(10)
+
+            # 유효한 URL이 있는 결과만, 최대 10개만 스코어링
+            scoreable = [
+                r for r in results
+                if (isinstance(r.thumbnail_url, str) and r.thumbnail_url.startswith('http'))
+                or (isinstance(r.image_url, str) and r.image_url.startswith('http'))
+            ][:10]
 
             async def score_one(result: EnhancedSearchResult) -> None:
                 async with semaphore:
                     try:
-                        thumbnail = result.thumbnail_url if isinstance(result.thumbnail_url, str) else None
-                        image = result.image_url if isinstance(result.image_url, str) else None
-                        img_url = thumbnail or image
-                        if not img_url or not img_url.startswith('http'):
-                            return
+                        img_url = (
+                            result.thumbnail_url if isinstance(result.thumbnail_url, str) and result.thumbnail_url.startswith('http')
+                            else result.image_url
+                        )
 
-                        async with httpx.AsyncClient(timeout=10.0) as client:
+                        async with httpx.AsyncClient(timeout=5.0) as client:
                             response = await client.get(img_url, headers=self.headers)
                         if response.status_code != 200:
                             return
@@ -582,7 +590,14 @@ class EnhancedImageSearchService:
                     except Exception as e:
                         logger.debug(f"Score calculation failed: {e}")
 
-            await asyncio.gather(*(score_one(r) for r in results))
+            # 전체 스코어링에 15초 제한
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(score_one(r) for r in scoreable)),
+                    timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Face match scoring timed out after 15s, returning partial results")
 
         except Exception as e:
             logger.warning(f"Match score error: {e}")

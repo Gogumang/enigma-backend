@@ -114,74 +114,78 @@ class ImageSearchScraper:
             )
 
     async def _upload_image(self, image_data: bytes) -> str | None:
-        """이미지를 무료 호스팅에 업로드 (여러 서비스 시도)"""
+        """이미지를 무료 호스팅에 업로드 (병렬 시도, 먼저 성공한 것 사용)"""
 
-        # 1. imgbb 사용 (가장 안정적)
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                image_base64 = base64.b64encode(image_data).decode('utf-8')
-                response = await client.post(
-                    "https://api.imgbb.com/1/upload",
-                    data={
-                        "key": "b4e63b7398cf5d7db0248937c931a004",
-                        "image": image_base64
-                    }
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("success"):
-                        url = data["data"]["url"]
-                        logger.info(f"imgbb upload success: {url}")
-                        return url
-                logger.warning(f"imgbb response: {response.status_code}")
-        except Exception as e:
-            logger.warning(f"imgbb upload failed: {e}")
+        async def _upload_imgbb() -> str | None:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(
+                        "https://api.imgbb.com/1/upload",
+                        data={
+                            "key": "b4e63b7398cf5d7db0248937c931a004",
+                            "image": base64.b64encode(image_data).decode('utf-8')
+                        }
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("success"):
+                            return data["data"]["url"]
+            except Exception:
+                pass
+            return None
 
-        # 2. catbox.moe (신뢰성 높음)
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                files = {"fileToUpload": ("image.jpg", image_data, "image/jpeg")}
-                response = await client.post(
-                    "https://catbox.moe/user/api.php",
-                    data={"reqtype": "fileupload"},
-                    files=files
-                )
-                if response.status_code == 200:
-                    url = response.text.strip()
-                    if url.startswith('http'):
-                        logger.info(f"catbox upload success: {url}")
-                        return url
-        except Exception as e:
-            logger.warning(f"catbox upload failed: {e}")
+        async def _upload_catbox() -> str | None:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(
+                        "https://catbox.moe/user/api.php",
+                        data={"reqtype": "fileupload"},
+                        files={"fileToUpload": ("image.jpg", image_data, "image/jpeg")}
+                    )
+                    if response.status_code == 200:
+                        url = response.text.strip()
+                        if url.startswith('http'):
+                            return url
+            except Exception:
+                pass
+            return None
 
-        # 3. litterbox (catbox의 임시 파일 서비스)
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                files = {"fileToUpload": ("image.jpg", image_data, "image/jpeg")}
-                response = await client.post(
-                    "https://litterbox.catbox.moe/resources/internals/api.php",
-                    data={"reqtype": "fileupload", "time": "24h"},
-                    files=files
-                )
-                if response.status_code == 200:
-                    url = response.text.strip()
-                    if url.startswith('http'):
-                        logger.info(f"litterbox upload success: {url}")
-                        return url
-        except Exception as e:
-            logger.warning(f"litterbox upload failed: {e}")
+        async def _upload_litterbox() -> str | None:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(
+                        "https://litterbox.catbox.moe/resources/internals/api.php",
+                        data={"reqtype": "fileupload", "time": "24h"},
+                        files={"fileToUpload": ("image.jpg", image_data, "image/jpeg")}
+                    )
+                    if response.status_code == 200:
+                        url = response.text.strip()
+                        if url.startswith('http'):
+                            return url
+            except Exception:
+                pass
+            return None
 
-        # 4. 0x0.st 백업
+        # 병렬 시도, 먼저 성공한 것 사용
+        tasks = [
+            asyncio.create_task(_upload_imgbb()),
+            asyncio.create_task(_upload_catbox()),
+            asyncio.create_task(_upload_litterbox()),
+        ]
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                files = {"file": ("image.jpg", image_data, "image/jpeg")}
-                response = await client.post("https://0x0.st", files=files)
-                if response.status_code == 200:
-                    url = response.text.strip()
-                    logger.info(f"0x0.st upload success: {url}")
-                    return url
-        except Exception as e:
-            logger.warning(f"0x0.st upload failed: {e}")
+            while tasks:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                tasks = list(pending)
+                for task in done:
+                    result = task.result()
+                    if result:
+                        for t in tasks:
+                            t.cancel()
+                        logger.info(f"Image upload success: {result}")
+                        return result
+        except Exception:
+            pass
 
         logger.error("All image upload services failed")
         return None
@@ -211,7 +215,7 @@ class ImageSearchScraper:
                 "Upgrade-Insecure-Requests": "1",
             }
 
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 response = await client.get(search_url, headers=yandex_headers)
 
                 logger.info(f"Yandex response status: {response.status_code}")
@@ -252,7 +256,7 @@ class ImageSearchScraper:
             encoded_url = quote(image_url, safe='')
             search_url = f"https://www.bing.com/images/search?view=detailv2&iss=sbi&q=imgurl:{encoded_url}"
 
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 response = await client.get(search_url, headers=self.headers)
 
                 if response.status_code == 200:
@@ -322,7 +326,7 @@ class ImageSearchScraper:
             # Google 이미지 검색 URL
             search_url = f"https://www.google.com/searchbyimage?image_url={encoded_url}"
 
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 response = await client.get(search_url, headers={
                     **self.headers,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -522,7 +526,7 @@ class ImageSearchScraper:
         original_image: bytes,
         results: list[ImageSearchResult]
     ) -> list[ImageSearchResult]:
-        """각 결과 이미지와 원본 비교하여 일치율 계산"""
+        """각 결과 이미지와 원본 비교하여 일치율 계산 (병렬, 최적화)"""
         if not self.face_recognition:
             return results
 
@@ -533,30 +537,41 @@ class ImageSearchScraper:
                 return results
 
             import numpy as np
+            original_arr = np.array(original_embedding)
+            semaphore = asyncio.Semaphore(10)
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                for result in results:
+            # 유효한 URL만, 최대 10개
+            scoreable = [
+                r for r in results
+                if (r.thumbnail_url and r.thumbnail_url.startswith('http'))
+                or (r.image_url and r.image_url.startswith('http'))
+            ][:10]
+
+            async def score_one(result: ImageSearchResult) -> None:
+                async with semaphore:
                     try:
                         img_url = result.thumbnail_url or result.image_url
-                        if not img_url or not img_url.startswith('http'):
-                            continue
-
-                        # 이미지 다운로드
-                        response = await client.get(img_url, headers=self.headers)
+                        async with httpx.AsyncClient(timeout=5.0) as client:
+                            response = await client.get(img_url, headers=self.headers)
                         if response.status_code != 200:
-                            continue
+                            return
 
-                        # 얼굴 비교
                         result_embedding = await self.face_recognition.extract_embedding(response.content)
                         if result_embedding:
-                            arr1 = np.array(original_embedding)
                             arr2 = np.array(result_embedding)
-                            distance = float(np.linalg.norm(arr1 - arr2))
+                            distance = float(np.linalg.norm(original_arr - arr2))
                             result.match_score = max(0, min(100, (1 - distance / 2) * 100))
-
                     except Exception as e:
                         logger.debug(f"Match score calculation failed: {e}")
-                        continue
+
+            # 전체 15초 제한
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(score_one(r) for r in scoreable)),
+                    timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Face match scoring timed out after 15s")
 
         except Exception as e:
             logger.warning(f"Match score calculation error: {e}")
