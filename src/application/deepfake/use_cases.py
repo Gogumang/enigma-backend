@@ -7,11 +7,12 @@ from PIL import Image
 
 from src.domain.deepfake import DeepfakeAnalysis, MediaType
 from src.infrastructure.ai import ImageQualityService
+from src.infrastructure.ai.image_quality import ImageQualityLevel
 from src.infrastructure.ai.deepfake_explainer import get_deepfake_explainer_service
 from src.infrastructure.external import SightengineService
 from src.shared.exceptions import ValidationException
 
-# UnivFD 및 Cross-EfficientViT 디텍터
+# UnivFD, CLIP, Cross-EfficientViT 디텍터
 def get_univfd_detector_safe():
     """UnivFD 디텍터 안전하게 가져오기"""
     try:
@@ -19,6 +20,15 @@ def get_univfd_detector_safe():
         return get_univfd_detector()
     except Exception as e:
         logger.warning(f"UnivFD detector not available: {e}")
+        return None
+
+def get_clip_detector_safe():
+    """CLIP 디텍터 안전하게 가져오기"""
+    try:
+        from src.infrastructure.ai.clip_detector import get_clip_detector
+        return get_clip_detector()
+    except Exception as e:
+        logger.warning(f"CLIP detector not available: {e}")
         return None
 
 def get_cross_evit_detector_safe():
@@ -102,11 +112,12 @@ class AnalyzeImageUseCase:
         # 0. GIF/PNG/WebP 등을 JPEG로 변환
         image_data = convert_to_jpeg(image_data)
 
-        # 1. 병렬 분석: 품질 체크 + Sightengine + UnivFD + EfficientViT
-        quality_result, sightengine_result, univfd_result, explainer_result = await asyncio.gather(
+        # 1. 병렬 분석: 품질 체크 + Sightengine + UnivFD + CLIP + EfficientViT
+        quality_result, sightengine_result, univfd_result, clip_result, explainer_result = await asyncio.gather(
             asyncio.to_thread(_image_quality_service.analyze, image_data),
             self._run_sightengine(image_data),
             self._run_univfd(image_data),
+            self._run_clip(image_data),
             self._run_explainer(image_data),
         )
 
@@ -233,11 +244,48 @@ class AnalyzeImageUseCase:
                 ensemble_details=ensemble_details,
             )
 
-        # 4. Sightengine-only 경로 (EfficientViT 사용 불가 시)
-        elif sightengine_result:
-            result = self._to_result(sightengine_result)
+        # 4. Sightengine + UnivFD/CLIP 경로 (EfficientViT 사용 불가 시)
+        elif sightengine_result or univfd_result or clip_result:
+            # 사용 가능한 모델들로 앙상블 구성
+            clip_confidence = clip_result.fake_score if clip_result else 0
 
-            # 순수 알고리즘 기반 마커 생성 (OpenAI 미사용)
+            confidence = self._fallback_ensemble(
+                sightengine_confidence, sightengine_genai_score,
+                univfd_confidence, clip_confidence,
+            )
+            is_deepfake = confidence >= 50
+
+            if confidence >= 70:
+                risk_level = "high"
+            elif confidence >= 50:
+                risk_level = "medium"
+            else:
+                risk_level = "low"
+
+            message = f"딥페이크 {'의심' if is_deepfake else '가능성 낮음'} ({confidence:.1f}%)"
+
+            logger.info(
+                f"Fallback Ensemble: Sightengine={sightengine_confidence:.1f}%, "
+                f"GenAI={sightengine_genai_score:.1f}%, UnivFD={univfd_confidence:.1f}%, "
+                f"CLIP={clip_confidence:.1f}% -> Final={confidence:.1f}%"
+            )
+
+            result = DeepfakeAnalysisResult(
+                is_deepfake=is_deepfake,
+                confidence=confidence,
+                risk_level=risk_level,
+                media_type="image",
+                message=message,
+                details={
+                    "sightengine_deepfake": sightengine_confidence,
+                    "sightengine_genai": sightengine_genai_score,
+                    "univfd": univfd_confidence,
+                    "clip": clip_confidence,
+                    "model": "UnivFD+CLIP Fallback Ensemble",
+                },
+            )
+
+            # 마커 및 평가 생성
             result.markers = self._generate_algorithm_markers(
                 image_data, result.is_deepfake, result.confidence
             )
@@ -245,10 +293,9 @@ class AnalyzeImageUseCase:
                 result.is_deepfake, result.confidence
             )
 
-        # 5. 시뮬레이션 결과 (API 키 없거나 모두 실패)
+        # 5. 시뮬레이션 결과 (모든 모델 실패)
         else:
             result = self._simulate_result(MediaType.IMAGE)
-            # 순수 알고리즘 기반 마커 생성 (OpenAI 미사용)
             result.markers = self._generate_algorithm_markers(
                 image_data, result.is_deepfake, result.confidence
             )
@@ -261,6 +308,20 @@ class AnalyzeImageUseCase:
         result.blur_score = quality_result.blur_score
         result.quality_warning = quality_result.warning_message
         result.is_reliable = quality_result.is_reliable
+
+        # 저화질 이미지 confidence 상한 적용
+        if quality_result.quality_level == ImageQualityLevel.LOW:
+            max_confidence = 60.0
+            if result.confidence > max_confidence:
+                result.details["original_confidence"] = result.confidence
+                result.confidence = max_confidence
+                # risk_level 재계산
+                result.risk_level = "medium" if result.confidence >= 50 else "low"
+        elif quality_result.quality_level == ImageQualityLevel.MEDIUM:
+            max_confidence = 80.0
+            if result.confidence > max_confidence:
+                result.details["original_confidence"] = result.confidence
+                result.confidence = max_confidence
 
         # 품질이 낮으면 메시지에 경고 추가
         if not quality_result.is_reliable:
@@ -291,6 +352,20 @@ class AnalyzeImageUseCase:
             return result
         except Exception as e:
             logger.warning(f"UnivFD detector failed: {e}")
+            return None
+
+    async def _run_clip(self, image_data: bytes):
+        """CLIP 디텍터 분석 (sync → async 변환)"""
+        detector = get_clip_detector_safe()
+        if not detector or not detector.is_available():
+            return None
+        try:
+            logger.info("Using CLIP for AI-generated image detection")
+            result = await asyncio.to_thread(detector.analyze, image_data)
+            logger.info(f"CLIP result: fake_score={result.fake_score:.1f}%")
+            return result
+        except Exception as e:
+            logger.warning(f"CLIP detector failed: {e}")
             return None
 
     async def _run_explainer(self, image_data: bytes):
@@ -327,16 +402,27 @@ class AnalyzeImageUseCase:
             return 0.0
         return weighted_sum / total_weight
 
-    async def execute_from_url(self, url: str) -> DeepfakeAnalysisResult:
-        """URL 이미지 분석 실행"""
-        if not url:
-            raise ValidationException("이미지 URL이 필요합니다")
-
-        if not self.sightengine.is_configured():
-            return self._simulate_result(MediaType.IMAGE)
-
-        analysis = await self.sightengine.analyze_image_url(url)
-        return self._to_result(analysis)
+    @staticmethod
+    def _fallback_ensemble(
+        sightengine: float, genai: float, univfd: float, clip: float
+    ) -> float:
+        """EfficientViT 없이 사용 가능한 모델만으로 앙상블"""
+        # UnivFD(0.40) + CLIP(0.25) + Sightengine deepfake(0.20) + Sightengine genai(0.15)
+        candidates = [
+            (univfd, 0.40),
+            (clip, 0.25),
+            (sightengine, 0.20),
+            (genai, 0.15),
+        ]
+        total_weight = 0.0
+        weighted_sum = 0.0
+        for score, weight in candidates:
+            if score > 0:
+                weighted_sum += score * weight
+                total_weight += weight
+        if total_weight == 0:
+            return 0.0
+        return weighted_sum / total_weight
 
     def _generate_algorithm_markers(
         self,
@@ -559,8 +645,14 @@ class AnalyzeVideoUseCase:
         cross_evit_confidence = cross_evit_result.confidence if cross_evit_result else 0
         sightengine_confidence = sightengine_result.confidence if sightengine_result else 0
 
-        # 앙상블: 두 결과 중 높은 값 사용
-        confidence = max(cross_evit_confidence, sightengine_confidence)
+        # 가중 앙상블: Cross-EfficientViT 65%, Sightengine 35% (응답한 엔진만 참여)
+        candidates = [
+            (cross_evit_confidence, 0.65),
+            (sightengine_confidence, 0.35),
+        ]
+        weighted_sum = sum(s * w for s, w in candidates if s > 0)
+        total_weight = sum(w for s, w in candidates if s > 0)
+        confidence = weighted_sum / total_weight if total_weight > 0 else 0
 
         # 둘 다 실패하면 시뮬레이션 결과
         if confidence == 0 and not cross_evit_result and not sightengine_result:

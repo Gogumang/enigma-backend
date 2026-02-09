@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
-from src.domain.chat import ROMANCE_SCAM_PATTERNS, MessageParser, RAGContext, ChatAnalysisResult, ParsedMessage
+from src.domain.chat import MessageParser, RAGContext, ChatAnalysisResult, ParsedMessage
 from src.infrastructure.persistence import QdrantScamRepository, Neo4jRelationshipRepository
 from src.shared.exceptions import ValidationException
 
@@ -39,13 +39,6 @@ class ChatAnalysisResponse:
     # 관계 분석 결과
     relationship_context: dict | None = None
     raw_risk_score: int | None = None  # 관계 조정 전 원본 점수
-
-
-@dataclass
-class ChatResponse:
-    """채팅 응답 DTO"""
-    message: str
-    analysis: ChatAnalysisResponse | None = None
 
 
 class AnalyzeChatUseCase:
@@ -261,54 +254,3 @@ class AnalyzeChatUseCase:
         )
 
 
-class ChatbotUseCase:
-    """챗봇 대화 유스케이스"""
-
-    def __init__(self, ai_service: AIService):
-        self.ai_service = ai_service
-
-    async def respond(
-        self,
-        user_message: str,
-        analyze_for_scam: bool = False
-    ) -> ChatResponse:
-        """사용자 메시지에 응답"""
-        if not user_message.strip():
-            raise ValidationException("메시지를 입력해주세요")
-
-        # AI 응답 생성
-        response_text = await self.ai_service.generate_response(user_message)
-
-        # 스캠 분석 요청 시
-        analysis = None
-        if analyze_for_scam:
-            result = await self.ai_service.analyze_chat([user_message])
-            analysis = ChatAnalysisResponse(
-                risk_score=result.risk_score,
-                risk_category=result.risk_category.value,
-                detected_patterns=result.detected_patterns,
-                warning_signs=result.warning_signs,
-                recommendations=result.recommendations,
-                ai_analysis=result.ai_analysis
-            )
-
-        return ChatResponse(
-            message=response_text,
-            analysis=analysis
-        )
-
-
-class GetPatternsUseCase:
-    """스캠 패턴 조회 유스케이스"""
-
-    def execute(self) -> list[dict]:
-        """모든 스캠 패턴 반환"""
-        return [
-            {
-                "type": p.pattern_type,
-                "description": p.description,
-                "severity": p.severity,
-                "examples": p.examples
-            }
-            for p in ROMANCE_SCAM_PATTERNS
-        ]

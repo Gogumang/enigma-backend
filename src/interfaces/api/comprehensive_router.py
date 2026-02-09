@@ -15,7 +15,7 @@ from src.interfaces.api.dependencies import (
     get_profile_search_use_case,
 )
 from src.interfaces.api.deepfake_router import _result_to_dict
-from src.interfaces.api.fraud_router import perform_fraud_check
+from src.interfaces.api.fraud_router import get_fraud_use_case
 from src.interfaces.api.url_router import perform_url_check
 
 router = APIRouter(prefix="/comprehensive", tags=["comprehensive"])
@@ -155,13 +155,16 @@ async def comprehensive_analyze(
         if not phone_val and not account_val:
             return None
 
+        fraud_use_case = get_fraud_use_case()
         result: dict = {}
 
         if phone_val:
-            result["phone"] = await perform_fraud_check("PHONE", phone_val)
+            r = await fraud_use_case.execute("PHONE", phone_val)
+            result["phone"] = r.to_dict()
 
         if account_val:
-            result["account"] = await perform_fraud_check("ACCOUNT", account_val)
+            r = await fraud_use_case.execute("ACCOUNT", account_val)
+            result["account"] = r.to_dict()
 
         return result
 

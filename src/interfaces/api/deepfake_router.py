@@ -48,6 +48,8 @@ def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
         # 알고리즘 검사 결과 (신규)
         "algorithmChecks": result.algorithm_checks,
         "ensembleDetails": result.ensemble_details,
+        # 저화질 보정 전 원래 confidence
+        "originalConfidence": result.details.get("original_confidence"),
     }
 
 

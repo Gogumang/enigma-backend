@@ -154,6 +154,13 @@ class OpenAIService:
 - 해외 체류 핑계 (군인, 석유 시추, UN)
 - 투자 권유, 원금 보장 약속
 
+## 가스라이팅/감정 조작 신호 (위험도 높임 - 70~100점):
+- 현실 왜곡: "내가 언제 그랬어?", "그런 적 없어", "네가 기억을 잘못하는 거야"
+- 감정 무효화: "너무 예민해", "별것도 아닌 걸로", "왜 그렇게 부정적이야"
+- 죄책감 유발: "나를 사랑하면 당연히", "다 너를 위해서야", "내가 이렇게까지 하는데"
+- 자존감 파괴: "나 아니면 누가 널 좋아하겠어", "넌 나 없으면 안 돼"
+- 책임 전가: "네가 잘못한 거야", "네가 그렇게 만든 거야", "다 네 탓이야"
+
 ## 분석할 대화:
 {chr(10).join(messages)}
 
@@ -447,6 +454,8 @@ JSON만 응답해주세요."""
             "future_faking": ["결혼하자", "같이 살자", "곧 만나자", "갈게"],
             "sob_story": ["사고가 났", "아파서", "병원비", "수술비", "도와줘"],
             "avoidance": ["영상통화 안", "화상 안", "만날 수 없", "카메라 고장"],
+            "gaslighting": ["네가 잘못", "너무 예민", "내가 언제 그랬", "그런 적 없", "기억을 잘못", "나 아니면 누가", "넌 나 없으면"],
+            "guilt_tripping": ["사랑하면 당연히", "다 너를 위해", "믿지 못하는 거", "이렇게까지 하는데", "다 네 탓"],
         }
 
         # 친구 맥락에서는 무시할 키워드 (계좌, 송금 등은 친구 내기일 수 있음)
@@ -460,6 +469,8 @@ JSON만 응답해주세요."""
             "future_faking": 6,
             "sob_story": 7,
             "avoidance": 8,
+            "gaslighting": 9,
+            "guilt_tripping": 8,
         }
 
         for pattern_type, keywords in keyword_patterns.items():
@@ -509,6 +520,10 @@ JSON만 응답해주세요."""
                 warning_signs.append("급박함을 강조하고 있습니다")
             if "isolation" in detected:
                 warning_signs.append("고립을 유도하는 패턴이 감지되었습니다")
+            if "gaslighting" in detected:
+                warning_signs.append("가스라이팅(감정 조작) 패턴이 감지되었습니다 - 상대방이 당신의 판단력을 흔들고 있습니다")
+            if "guilt_tripping" in detected:
+                warning_signs.append("죄책감을 유발하여 조종하려는 패턴이 감지되었습니다")
         else:
             warning_signs.append("친구/지인 간의 일상 대화로 판단됩니다")
 
@@ -563,6 +578,25 @@ JSON만 응답해주세요."""
         except Exception as e:
             logger.error(f"OpenAI response generation failed: {e}")
             return "죄송합니다, 응답을 생성하는 중 오류가 발생했습니다."
+
+    async def generate_text(self, prompt: str) -> str:
+        """범용 텍스트 생성 (신고서 등)"""
+        if not self._client:
+            await self.initialize()
+        if not self._client:
+            return ""
+
+        try:
+            response = await self._client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.4,
+                max_tokens=2000,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            logger.error(f"OpenAI text generation failed: {e}")
+            return ""
 
     async def analyze_deepfake_image(self, image_data: bytes, is_deepfake: bool, confidence: float) -> dict:
         """이미지 딥페이크 분석 (얼굴 랜드마크 + GPT-4o Vision)"""

@@ -121,7 +121,7 @@ class CLIPDeepfakeDetector:
 
             # Softmax로 확률 계산
             scores = torch.tensor([real_score, fake_score])
-            probs = torch.softmax(scores * 100, dim=0)  # temperature scaling
+            probs = torch.softmax(scores * 50, dim=0)  # temperature scaling
 
             real_prob = probs[0].item()
             fake_prob = probs[1].item()

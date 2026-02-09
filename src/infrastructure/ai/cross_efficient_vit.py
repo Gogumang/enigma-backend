@@ -143,18 +143,14 @@ class CrossEfficientViT(nn.Module):
         """
         b, t, c, h, w = frames.shape
 
-        # Extract features from each frame using EfficientNet
-        frame_features = []
-        for i in range(t):
-            if self.efficient_net is not None:
-                feat = self.efficient_net.extract_features(frames[:, i])
-                feat = feat.mean(dim=[2, 3])  # Global average pooling
-            else:
-                feat = frames[:, i].mean(dim=[1, 2, 3]).unsqueeze(-1).expand(-1, 1280)
-            frame_features.append(feat)
-
-        # Stack frame features: (batch, num_frames, 1280)
-        x = torch.stack(frame_features, dim=1)
+        # Extract features from all frames at once (batched)
+        if self.efficient_net is not None:
+            flat_frames = rearrange(frames, 'b t c h w -> (b t) c h w')
+            flat_feat = self.efficient_net.extract_features(flat_frames)
+            flat_feat = flat_feat.mean(dim=[2, 3])  # Global average pooling
+            x = rearrange(flat_feat, '(b t) d -> b t d', b=b, t=t)
+        else:
+            x = frames.mean(dim=[2, 3, 4]).unsqueeze(-1).expand(-1, -1, 1280)
 
         # Project to dim
         x = self.feature_proj(x)
@@ -185,7 +181,7 @@ class CrossEfficientViTDetector:
         self._device = None
         self._initialized = False
         self._image_size = 224
-        self._num_frames = 30
+        self._num_frames = 16  # 추출 프레임 수 (속도 최적화)
 
     def _ensure_initialized(self):
         """모델 초기화"""
@@ -196,11 +192,11 @@ class CrossEfficientViTDetector:
             self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             logger.info(f"Cross-EfficientViT using device: {self._device}")
 
-            # 모델 생성
+            # 모델 생성 (num_frames=30: 체크포인트 positional embedding 호환)
             self._model = CrossEfficientViT(
                 num_classes=1,
                 image_size=self._image_size,
-                num_frames=self._num_frames,
+                num_frames=30,
             )
 
             # 사전 훈련된 가중치 로드 시도
@@ -225,9 +221,48 @@ class CrossEfficientViTDetector:
             logger.error(f"Failed to initialize Cross-EfficientViT: {e}")
             raise
 
-    def _extract_frames(self, video_data: bytes, max_frames: int = 30) -> list[np.ndarray]:
-        """비디오에서 프레임 추출"""
-        frames = []
+    def _detect_face_bbox(self, sample_frames: list[np.ndarray]) -> tuple[int, int, int, int] | None:
+        """샘플 프레임에서 얼굴 바운딩 박스 탐지 (30% 마진 포함)"""
+        try:
+            import mediapipe as mp
+            face_detection = mp.solutions.face_detection.FaceDetection(
+                model_selection=0, min_detection_confidence=0.5
+            )
+
+            for frame in sample_frames:
+                results = face_detection.process(frame)
+                if results.detections:
+                    det = results.detections[0]
+                    bbox = det.location_data.relative_bounding_box
+                    h, w = frame.shape[:2]
+
+                    # 상대 좌표 → 절대 좌표
+                    x1 = int(bbox.xmin * w)
+                    y1 = int(bbox.ymin * h)
+                    bw = int(bbox.width * w)
+                    bh = int(bbox.height * h)
+
+                    # 30% 마진 추가
+                    margin_x = int(bw * 0.3)
+                    margin_y = int(bh * 0.3)
+                    x1 = max(0, x1 - margin_x)
+                    y1 = max(0, y1 - margin_y)
+                    x2 = min(w, x1 + bw + 2 * margin_x)
+                    y2 = min(h, y1 + bh + 2 * margin_y)
+
+                    face_detection.close()
+                    logger.info(f"Face detected: ({x1},{y1})-({x2},{y2}) in {w}x{h} frame")
+                    return (x1, y1, x2, y2)
+
+            face_detection.close()
+        except Exception as e:
+            logger.warning(f"Face detection failed, using full frame: {e}")
+
+        return None
+
+    def _extract_frames(self, video_data: bytes, max_frames: int = 16) -> list[np.ndarray]:
+        """비디오에서 프레임 추출 (얼굴 크롭 포함)"""
+        raw_frames = []
 
         # 임시 파일로 저장
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
@@ -248,16 +283,31 @@ class CrossEfficientViTDetector:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
                 ret, frame = cap.read()
                 if ret:
-                    # BGR -> RGB, resize
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frame = cv2.resize(frame, (self._image_size, self._image_size))
-                    frames.append(frame)
+                    raw_frames.append(frame)
 
             cap.release()
 
         finally:
             import os
             os.unlink(temp_path)
+
+        if not raw_frames:
+            return []
+
+        # 샘플 3개로 얼굴 탐지
+        sample_indices = np.linspace(0, len(raw_frames) - 1, min(3, len(raw_frames)), dtype=int)
+        sample_frames = [raw_frames[i] for i in sample_indices]
+        face_bbox = self._detect_face_bbox(sample_frames)
+
+        # 얼굴 크롭 적용 후 리사이즈
+        frames = []
+        for frame in raw_frames:
+            if face_bbox:
+                x1, y1, x2, y2 = face_bbox
+                frame = frame[y1:y2, x1:x2]
+            frame = cv2.resize(frame, (self._image_size, self._image_size))
+            frames.append(frame)
 
         return frames
 
@@ -305,17 +355,8 @@ class CrossEfficientViTDetector:
             confidence = prob * 100
             is_deepfake = confidence >= 50
 
-            # 개별 프레임 분석 (간단한 방식)
-            frame_scores = []
-            for i in range(0, len(frames), max(1, len(frames) // 5)):
-                single_frame = self._preprocess_frames([frames[i]]).to(self._device)
-                # 단일 프레임은 시간 축이 1이므로 패딩 필요
-                if single_frame.shape[1] < self._num_frames:
-                    padding = single_frame.expand(-1, self._num_frames, -1, -1, -1)
-                    with torch.no_grad():
-                        frame_logit = self._model(padding)
-                        frame_prob = torch.sigmoid(frame_logit).item() * 100
-                        frame_scores.append(frame_prob)
+            # 전체 신뢰도를 프레임 스코어로 사용
+            frame_scores = [confidence] * len(frames)
 
             return CrossEViTResult(
                 is_deepfake=is_deepfake,

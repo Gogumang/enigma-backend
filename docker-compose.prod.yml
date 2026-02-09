@@ -6,8 +6,9 @@ services:
     container_name: enigma-app
     restart: unless-stopped
     env_file:
-      - .env
+      - .env.production
     environment:
+      - ENV=production
       - PORT=4000
     ports:
       - "4000:4000"

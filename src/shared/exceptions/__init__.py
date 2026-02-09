@@ -12,19 +12,9 @@ class ValidationException(DomainException):
         super().__init__(message, "VALIDATION_ERROR")
 
 
-class NotFoundException(DomainException):
-    """Resource not found"""
-    def __init__(self, message: str):
-        super().__init__(message, "NOT_FOUND")
-
-
 class ExternalServiceException(DomainException):
     """External service error"""
     def __init__(self, message: str, service: str):
         super().__init__(f"{service}: {message}", "EXTERNAL_SERVICE_ERROR")
 
 
-class AIModelException(DomainException):
-    """AI model error"""
-    def __init__(self, message: str):
-        super().__init__(message, "AI_MODEL_ERROR")

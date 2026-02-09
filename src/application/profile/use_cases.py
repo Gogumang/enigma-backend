@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from urllib.parse import quote
 
 from src.domain.profile import ProfileMatch, ReverseSearchLink, ScammerMatch
-from src.domain.scammer import ScammerEntity, ScammerRepository
 from src.infrastructure.ai import FaceRecognitionService
 from src.infrastructure.external import (
     EnhancedImageSearchService,
@@ -52,26 +51,16 @@ class ProfileSearchResult:
     uploaded_image_url: str | None = None
 
 
-@dataclass
-class ReportScammerResult:
-    """스캐머 신고 결과 DTO"""
-    success: bool
-    message: str
-    scammer_id: str | None = None
-
-
 class ProfileSearchUseCase:
     """프로필 검색 유스케이스 - 강화된 버전"""
 
     def __init__(
         self,
         face_recognition: FaceRecognitionService,
-        scammer_repository: ScammerRepository,
         image_search_scraper: ImageSearchScraper | None = None,
         social_media_searcher: SocialMediaSearcher | None = None
     ):
         self.face_recognition = face_recognition
-        self.scammer_repository = scammer_repository
         # 기존 서비스 (하위 호환성)
         self.image_search_scraper = image_search_scraper or ImageSearchScraper(face_recognition)
         self.social_media_searcher = social_media_searcher or SocialMediaSearcher()
@@ -214,20 +203,6 @@ class ProfileSearchUseCase:
             social_search_links=social_search_links
         )
 
-    async def search_by_phone(self, phone: str) -> list[dict]:
-        """전화번호로 검색"""
-        if not phone.strip():
-            raise ValidationException("전화번호를 입력해주세요")
-
-        return self.enhanced_social.generate_phone_search_links(phone.strip())
-
-    async def search_by_email(self, email: str) -> list[dict]:
-        """이메일로 검색"""
-        if not email.strip():
-            raise ValidationException("이메일을 입력해주세요")
-
-        return self.enhanced_social.generate_email_search_links(email.strip())
-
     def _generate_search_links(self, query: str) -> dict[str, list[ProfileMatch]]:
         """플랫폼별 검색 링크 생성 (하위 호환성)"""
         encoded_query = quote(query)
@@ -286,66 +261,3 @@ class ProfileSearchUseCase:
         }
 
 
-class ReportScammerUseCase:
-    """스캐머 신고 유스케이스"""
-
-    def __init__(
-        self,
-        face_recognition: FaceRecognitionService,
-        scammer_repository: ScammerRepository
-    ):
-        self.face_recognition = face_recognition
-        self.scammer_repository = scammer_repository
-
-    async def report(
-        self,
-        image_data: bytes,
-        name: str,
-        source: str | None = None
-    ) -> ReportScammerResult:
-        """스캐머 신고"""
-        if not name.strip():
-            raise ValidationException("스캐머 이름을 입력해주세요")
-
-        # 1. 얼굴 임베딩 추출
-        embedding = await self.face_recognition.extract_embedding(image_data)
-
-        if not embedding:
-            return ReportScammerResult(
-                success=False,
-                message="이미지에서 얼굴을 감지할 수 없습니다"
-            )
-
-        # 2. 기존 스캐머 확인
-        existing = await self.scammer_repository.find_by_face_embedding(
-            embedding, threshold=0.4
-        )
-
-        if existing:
-            # 이미 등록된 스캐머 - 신고 횟수 증가
-            scammer, distance = existing[0]
-            scammer.increment_report()
-            await self.scammer_repository.save(scammer)
-
-            return ReportScammerResult(
-                success=True,
-                message=f"이미 등록된 스캐머입니다. 신고 횟수: {scammer.report_count}",
-                scammer_id=scammer.id
-            )
-
-        # 3. 새 스캐머 등록
-        new_scammer = ScammerEntity.create(
-            name=name.strip(),
-            face_embedding=embedding,
-            source=source
-        )
-
-        await self.scammer_repository.save(new_scammer)
-
-        logger.info(f"New scammer registered: {new_scammer.id}")
-
-        return ReportScammerResult(
-            success=True,
-            message="스캐머가 데이터베이스에 등록되었습니다",
-            scammer_id=new_scammer.id
-        )

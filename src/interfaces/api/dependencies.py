@@ -16,7 +16,6 @@ from src.infrastructure.external import (
     SocialMediaSearcher,
 )
 from src.infrastructure.persistence import (
-    JsonScammerRepository,
     QdrantScamRepository,
     Neo4jRelationshipRepository,
     ScamReportRepository,
@@ -37,11 +36,6 @@ def get_sightengine_service() -> SightengineService:
 @lru_cache
 def get_openai_service() -> OpenAIService:
     return OpenAIService()
-
-
-@lru_cache
-def get_scammer_repository() -> JsonScammerRepository:
-    return JsonScammerRepository()
 
 
 @lru_cache
@@ -74,7 +68,6 @@ def get_social_media_searcher() -> SocialMediaSearcher:
 def get_profile_search_use_case() -> ProfileSearchUseCase:
     return ProfileSearchUseCase(
         face_recognition=get_face_recognition_service(),
-        scammer_repository=get_scammer_repository(),
         image_search_scraper=get_image_search_scraper(),
         social_media_searcher=get_social_media_searcher()
     )
@@ -120,9 +113,6 @@ async def initialize_services():
         await openai_service.initialize()
     except Exception as e:
         logger.warning(f"OpenAI 초기화 실패 (폴백 사용): {e}")
-
-    scammer_repo = get_scammer_repository()
-    await scammer_repo.initialize()
 
     # QdrantScamRepository 초기화 (대화 패턴 벡터 검색)
     try:

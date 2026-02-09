@@ -51,11 +51,11 @@ class ScamTrainingUseCaseV2:
 
     async def start_session(
         self,
-        persona_id: str = "military_james"
+        persona_id: str = "facebook_un_michael"
     ) -> tuple[dict, str]:
         """훈련 세션 시작"""
         if persona_id not in SCAMMER_PERSONAS:
-            persona_id = "military_james"
+            persona_id = "facebook_un_michael"
 
         session_id = str(uuid.uuid4())
         state = self.graph.create_initial_state(session_id, persona_id)

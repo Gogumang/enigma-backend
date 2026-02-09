@@ -275,4 +275,16 @@ ROMANCE_SCAM_PATTERNS = [
         severity=7,
         examples=["사고가 났어", "아파", "돈이 없어"]
     ),
+    ChatPattern(
+        pattern_type="gaslighting",
+        description="가스라이팅/감정 조작",
+        severity=9,
+        examples=["네가 잘못한 거야", "너무 예민해", "내가 언제 그랬어", "다 너를 위해서야"]
+    ),
+    ChatPattern(
+        pattern_type="guilt_tripping",
+        description="죄책감 유발",
+        severity=8,
+        examples=["나를 사랑하면 당연히", "나 때문에 힘들어", "믿지 못하는 거야?", "내가 이렇게까지 하는데"]
+    ),
 ]

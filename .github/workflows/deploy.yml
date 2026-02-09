@@ -81,9 +81,10 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Create .env file
+      - name: Create .env.production file
         run: |
-          cat > .env << EOF
+          cat > .env.production << EOF
+          ENV=production
           PORT=4000
           CORS_ORIGIN=${{ secrets.CORS_ORIGIN }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
@@ -95,6 +96,10 @@ jobs:
           NEO4J_USERNAME=${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASSWORD=${{ secrets.NEO4J_PASSWORD }}
           SERPAPI_KEY=${{ secrets.SERPAPI_KEY }}
+          POLICE_FRAUD_URL=${{ secrets.POLICE_FRAUD_URL }}
+          POLICE_FRAUD_KEY=${{ secrets.POLICE_FRAUD_KEY }}
+          CYBERCOP_URL=${{ secrets.CYBERCOP_URL }}
+          GOOGLE_SAFE_BROWSING_KEY=${{ secrets.GOOGLE_SAFE_BROWSING_KEY }}
           EOF
 
       - name: Copy files to EC2
@@ -103,7 +108,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "docker-compose.prod.yml,infra/nginx,.env"
+          source: "docker-compose.prod.yml,infra/nginx,.env.production"
           target: "/home/ubuntu/app"
 
       - name: Deploy to EC2
