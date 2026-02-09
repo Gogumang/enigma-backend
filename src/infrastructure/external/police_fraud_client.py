@@ -22,7 +22,7 @@ class PoliceFraudClient(FraudExternalPort):
             return source
 
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 resp = await client.post(
                     f"{settings.police_fraud_url}/user/cyber/fraud.do",
                     data={

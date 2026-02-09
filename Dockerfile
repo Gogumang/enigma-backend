@@ -18,7 +18,7 @@ COPY src ./src
 # Create venv and install dependencies (CPU-only PyTorch for smaller image)
 RUN python -m venv /app/.venv && \
     . /app/.venv/bin/activate && \
-    pip install --no-cache-dir --upgrade pip setuptools && \
+    pip install --no-cache-dir --upgrade pip "setuptools<81" wheel && \
     pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir . && \
     pip install --no-cache-dir git+https://github.com/openai/CLIP.git
