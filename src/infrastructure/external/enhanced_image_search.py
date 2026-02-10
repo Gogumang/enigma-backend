@@ -72,7 +72,13 @@ class EnhancedImageSearchService:
 
             logger.info(f"Image uploaded: {uploaded_image_url}")
 
-            # 2. 병렬로 여러 검색 실행 (업로드된 URL 사용)
+            # 2. 병렬로 검색 + 원본 얼굴 임베딩 동시 추출
+            import numpy as np
+
+            embedding_task = asyncio.create_task(
+                asyncio.to_thread(self._extract_embedding_sync, image_data)
+            ) if self.face_recognition else None
+
             search_tasks = [
                 self._search_serpapi_lens(uploaded_image_url),
                 self._search_serpapi_google_images(uploaded_image_url),
@@ -93,9 +99,13 @@ class EnhancedImageSearchService:
             # 4. 플랫폼 분류
             results = self._classify_platforms(results)
 
-            # 5. 얼굴 비교로 매치 스코어 계산
-            if self.face_recognition and results:
-                results = await self._calculate_match_scores(image_data, results)
+            # 5. 얼굴 비교 (원본 임베딩은 이미 추출 완료)
+            if embedding_task and results:
+                original_embedding = await embedding_task
+                if original_embedding:
+                    results = await self._score_with_embedding(
+                        np.array(original_embedding), results
+                    )
 
             # 6. 점수순 정렬
             results.sort(key=lambda x: x.match_score, reverse=True)
@@ -227,7 +237,7 @@ class EnhancedImageSearchService:
             return results
 
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(
                     "https://serpapi.com/search",
                     params={
@@ -292,7 +302,7 @@ class EnhancedImageSearchService:
             return results
 
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(
                     "https://serpapi.com/search",
                     params={
@@ -332,7 +342,7 @@ class EnhancedImageSearchService:
             return results
 
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(
                     "https://serpapi.com/search",
                     params={
@@ -538,26 +548,16 @@ class EnhancedImageSearchService:
 
         return results
 
-    async def _calculate_match_scores(
+    async def _score_with_embedding(
         self,
-        original_image: bytes,
+        original_arr,
         results: list[EnhancedSearchResult]
     ) -> list[EnhancedSearchResult]:
-        """얼굴 비교로 매치 스코어 계산 (병렬, 최적화)"""
-        if not self.face_recognition:
-            return results
+        """미리 추출된 원본 임베딩으로 매치 스코어 계산"""
+        import numpy as np
 
         try:
-            import numpy as np
-
-            original_embedding = await asyncio.to_thread(
-                self._extract_embedding_sync, original_image
-            )
-            if not original_embedding:
-                return results
-
-            original_arr = np.array(original_embedding)
-            semaphore = asyncio.Semaphore(10)
+            semaphore = asyncio.Semaphore(5)
 
             # 유효한 URL이 있는 결과만, 최대 10개만 스코어링
             scoreable = [
@@ -590,14 +590,14 @@ class EnhancedImageSearchService:
                     except Exception as e:
                         logger.debug(f"Score calculation failed: {e}")
 
-            # 전체 스코어링에 15초 제한
+            # 전체 스코어링에 10초 제한
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*(score_one(r) for r in scoreable)),
-                    timeout=15.0
+                    timeout=10.0
                 )
             except asyncio.TimeoutError:
-                logger.warning("Face match scoring timed out after 15s, returning partial results")
+                logger.warning("Face match scoring timed out after 10s, returning partial results")
 
         except Exception as e:
             logger.warning(f"Match score error: {e}")

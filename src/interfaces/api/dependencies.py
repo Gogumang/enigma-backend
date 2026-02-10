@@ -161,4 +161,17 @@ async def _preload_ai_models(logger):
         except Exception as e:
             logger.warning(f"SigLIP 프리로드 실패 (폴백 사용): {e}")
 
-    await asyncio.gather(_load_explainer(), _load_siglip())
+    async def _load_deepface():
+        try:
+            from deepface import DeepFace
+            await asyncio.to_thread(
+                DeepFace.represent,
+                img_path=__import__("numpy").zeros((100, 100, 3), dtype="uint8"),
+                model_name="VGG-Face",
+                enforce_detection=False,
+            )
+            logger.info("DeepFace VGG-Face 모델 프리로드 완료")
+        except Exception as e:
+            logger.warning(f"DeepFace 프리로드 실패: {e}")
+
+    await asyncio.gather(_load_explainer(), _load_siglip(), _load_deepface())
