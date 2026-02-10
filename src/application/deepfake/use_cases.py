@@ -151,8 +151,8 @@ class AnalyzeImageUseCase:
             algorithm_checks = [
                 {
                     "name": c.name,
-                    "passed": c.passed,
-                    "score": c.score,
+                    "passed": bool(c.passed),
+                    "score": float(c.score),
                     "description": c.description,
                 }
                 for c in getattr(explainer_result, 'algorithm_checks', [])
@@ -426,8 +426,8 @@ class AnalyzeImageUseCase:
             return [
                 {
                     "name": c.name,
-                    "passed": c.passed,
-                    "score": c.score,
+                    "passed": bool(c.passed),
+                    "score": float(c.score),
                     "description": c.description,
                 }
                 for c in checks

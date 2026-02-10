@@ -1,3 +1,4 @@
+import numpy as np
 from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel
 
@@ -14,6 +15,23 @@ from src.interfaces.api.dependencies import (
 router = APIRouter(prefix="/deepfake", tags=["deepfake"])
 
 
+def _sanitize_numpy(obj):
+    """numpy 타입을 Python 네이티브 타입으로 재귀 변환"""
+    if isinstance(obj, dict):
+        return {k: _sanitize_numpy(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_numpy(v) for v in obj]
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 class AnalysisResponse(BaseModel):
     success: bool
     data: dict | None = None
@@ -27,7 +45,7 @@ def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
     if "heatmap_base64" in details_copy:
         heatmap_base64 = details_copy.pop("heatmap_base64")
 
-    return {
+    data = {
         "isDeepfake": result.is_deepfake,
         "confidence": result.confidence,
         "riskLevel": result.risk_level,
@@ -51,6 +69,7 @@ def _result_to_dict(result: DeepfakeAnalysisResult) -> dict:
         # 저화질 보정 전 원래 confidence
         "originalConfidence": result.details.get("original_confidence"),
     }
+    return _sanitize_numpy(data)
 
 
 @router.post("/analyze/image", response_model=AnalysisResponse)
