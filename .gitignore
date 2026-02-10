@@ -63,5 +63,14 @@ data/uploads/
 *.db
 *.sqlite
 
+# SSL certificates & keys
+infra/nginx/ssl/*.pem
+
+# Terraform
+infra/terraform/terraform.tfstate
+infra/terraform/terraform.tfstate.backup
+infra/terraform/.terraform/
+infra/terraform/terraform.tfvars
+
 # Lock files (optional, uncomment if you don't want to track)
 # uv.lock
