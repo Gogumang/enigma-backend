@@ -140,7 +140,7 @@ async def initialize_services():
 
 
 async def _preload_ai_models(logger):
-    """GenD-PE 모델을 미리 로드"""
+    """AI 모델을 미리 로드 (첫 요청 cold start 방지)"""
 
     async def _load_explainer():
         try:
@@ -152,4 +152,13 @@ async def _preload_ai_models(logger):
         except Exception as e:
             logger.warning(f"GenD-PE 프리로드 실패 (폴백 사용): {e}")
 
-    await _load_explainer()
+    async def _load_siglip():
+        try:
+            from src.infrastructure.ai.clip_detector import get_clip_detector
+            detector = get_clip_detector()
+            await asyncio.to_thread(detector._ensure_initialized)
+            logger.info("SigLIP 모델 프리로드 완료")
+        except Exception as e:
+            logger.warning(f"SigLIP 프리로드 실패 (폴백 사용): {e}")
+
+    await asyncio.gather(_load_explainer(), _load_siglip())

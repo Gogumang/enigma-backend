@@ -544,11 +544,14 @@ class DeepfakeExplainerService:
         self._model = None
         self._device = None
         self._initialized = False
+        self._init_failed = False
 
     def _ensure_initialized(self):
         """모델 초기화 (지연 로딩)"""
         if self._initialized:
             return
+        if self._init_failed:
+            raise RuntimeError("GenD-PE initialization previously failed")
 
         try:
             from transformers import AutoModel
@@ -567,6 +570,8 @@ class DeepfakeExplainerService:
             logger.info("DeepfakeExplainerService (GenD-PE) initialized successfully")
 
         except Exception as e:
+            self._init_failed = True
+            self._model = None
             logger.error(f"Failed to initialize DeepfakeExplainerService: {e}")
             raise
 

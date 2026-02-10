@@ -30,11 +30,14 @@ class SigLIPDeepfakeDetector:
         self._processor = None
         self._device = None
         self._initialized = False
+        self._init_failed = False
 
     def _ensure_initialized(self):
         """모델 초기화 (지연 로딩)"""
         if self._initialized:
             return
+        if self._init_failed:
+            raise RuntimeError("SigLIP initialization previously failed")
 
         try:
             from transformers import AutoModel, AutoProcessor
@@ -52,12 +55,9 @@ class SigLIPDeepfakeDetector:
             self._initialized = True
             logger.info("SigLIP Deepfake Detector initialized successfully")
 
-        except ImportError:
-            logger.warning(
-                "transformers not installed. Run: pip install transformers"
-            )
-            raise
         except Exception as e:
+            self._init_failed = True
+            self._model = None
             logger.error(f"Failed to initialize SigLIP detector: {e}")
             raise
 
