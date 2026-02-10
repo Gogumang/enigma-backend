@@ -286,6 +286,19 @@ class AnalyzeImageUseCase:
 
             result.algorithm_checks = algorithm_checks
 
+            # 알고리즘 검사 결과로 confidence 보정
+            confidence = self._boost_confidence_by_algorithms(confidence, algorithm_checks)
+            is_deepfake = confidence >= 50
+            result.confidence = confidence
+            result.is_deepfake = is_deepfake
+            if confidence >= 70:
+                result.risk_level = "high"
+            elif confidence >= 50:
+                result.risk_level = "medium"
+            else:
+                result.risk_level = "low"
+            result.message = f"딥페이크 {'의심' if is_deepfake else '가능성 낮음'} ({confidence:.1f}%)"
+
             # 기술적 지표 생성
             for check in algorithm_checks:
                 if not check["passed"]:
@@ -322,6 +335,17 @@ class AnalyzeImageUseCase:
             # 6가지 알고리즘 검사 (독립 실행)
             algorithm_checks = await self._run_algorithm_checks_standalone(image_data)
             result.algorithm_checks = algorithm_checks
+
+            # 알고리즘 검사 결과로 confidence 보정
+            result.confidence = self._boost_confidence_by_algorithms(result.confidence, algorithm_checks)
+            result.is_deepfake = result.confidence >= 50
+            if result.confidence >= 70:
+                result.risk_level = "high"
+            elif result.confidence >= 50:
+                result.risk_level = "medium"
+            else:
+                result.risk_level = "low"
+            result.message = f"딥페이크 {'의심' if result.is_deepfake else '가능성 낮음'} ({result.confidence:.1f}%)"
 
             for check in algorithm_checks:
                 if not check["passed"]:
@@ -463,12 +487,13 @@ class AnalyzeImageUseCase:
         sightengine: float, genai: float, siglip: float
     ) -> float:
         """GenD-PE 없이 사용 가능한 모델만으로 앙상블
-        Fallback: SigLIP(35%) + Sightengine(35%) + GenAI(30%)
+        Fallback: Sightengine(45%) + GenAI(40%) + SigLIP(15%)
+        SigLIP은 보조 지표로만 활용 (Sightengine/GenAI 대비 정확도 낮음)
         """
         candidates = [
-            (siglip, 0.35),
-            (sightengine, 0.35),
-            (genai, 0.30),
+            (sightengine, 0.45),
+            (genai, 0.40),
+            (siglip, 0.15),
         ]
         total_weight = 0.0
         weighted_sum = 0.0
@@ -479,6 +504,58 @@ class AnalyzeImageUseCase:
         if total_weight == 0:
             return 0.0
         return weighted_sum / total_weight
+
+    @staticmethod
+    def _boost_confidence_by_algorithms(
+        confidence: float, algorithm_checks: list[dict]
+    ) -> float:
+        """알고리즘 검사 결과로 confidence 보정 (폴백 경로용)
+        GenD-PE가 없을 때, 6가지 독립 알고리즘 검사 결과를 점수에 반영
+        """
+        if not algorithm_checks:
+            return confidence
+
+        # ai_generated 제외한 순수 이미지 분석 알고리즘만 카운트
+        image_checks = [
+            c for c in algorithm_checks if c["name"] != "ai_generated"
+        ]
+        suspicious_count = sum(
+            1 for c in image_checks if not c.get("passed", True)
+        )
+
+        # 의심 알고리즘 가중 평균 점수
+        suspicious_scores = [
+            c["score"] for c in image_checks
+            if not c.get("passed", True) and isinstance(c.get("score"), (int, float))
+        ]
+        avg_suspicious_score = (
+            sum(suspicious_scores) / len(suspicious_scores)
+            if suspicious_scores else 0
+        )
+
+        # 의심 항목 수에 따라 보정
+        if suspicious_count >= 4:
+            boost = 1.15
+        elif suspicious_count >= 3:
+            boost = 1.10
+        elif suspicious_count >= 2:
+            boost = 1.05
+        else:
+            boost = 1.0
+
+        # 의심 알고리즘의 평균 점수가 높으면 추가 보정
+        if avg_suspicious_score > 0.6 and suspicious_count >= 2:
+            boost += 0.03
+
+        boosted = min(100.0, confidence * boost)
+
+        if boost > 1.0:
+            logger.info(
+                f"Algorithm boost: {confidence:.1f}% -> {boosted:.1f}% "
+                f"(suspicious={suspicious_count}, avg_score={avg_suspicious_score:.2f}, boost={boost:.2f})"
+            )
+
+        return boosted
 
     def _generate_algorithm_markers(
         self,
